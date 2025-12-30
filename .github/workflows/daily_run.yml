@@ -1,0 +1,30 @@
+name: Nasdaq Strategy Daily Run
+
+on:
+  schedule:
+    # 北京时间每天早上 20:30 (冬令时) 运行
+    # 对应 UTC 时间 12:30
+    - cron: '30 12 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Strategy
+        env:
+          PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+        run: python main.py
