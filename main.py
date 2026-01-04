@@ -20,15 +20,13 @@ def send_pushplus(title, content):
         return
 
     url = 'http://www.pushplus.plus/send'
-    # 为了在手机上显示更美观，针对表格做简单的 Markdown 处理
-    # 这一步将换行符转换为 HTML/Markdown 认可的格式
     content = content.replace('\n', '\n\n') 
     
     data = {
         "token": token,
         "title": title,
         "content": content,
-        "template": "markdown"  # 使用 markdown 模板以支持表格格式
+        "template": "markdown"
     }
     
     try:
@@ -42,28 +40,30 @@ def send_pushplus(title, content):
 
 # ================= 1. 策略逻辑封装 =================
 def run_strategy_logic():
-    # ------------------ 原有配置参数 ------------------
+    # ------------------ 配置参数 ------------------
     symbol_1x = 'QQQ'   
     symbol_2x = 'QLD'   
     symbol_3x = 'TQQQ'
     symbol_spx = 'SPY'
     indicator_asset = '^NDX'
 
-    # 核心参数 (最优解)
+    # 核心参数 (已修改 RSI 卖出阈值为 75)
     ma_window = 200
     rsi_window = 14
     rsi_buy_3x = 50     # RSI < 50 进 3x
-    rsi_sell_3x = 80    # RSI > 80 退 2x
-    bear_buffer = 0.0   # 跌破均线立即跑
-    bull_buffer = 0.005 # 站稳均线进场
+    rsi_sell_3x = 75    # RSI > 75 退 2x (原为 80)
+    bear_buffer = 0.0   
+    bull_buffer = 0.005 
     transaction_cost = 0.001 
+
+    etf_map = {1: symbol_1x, 2: symbol_2x, 3: symbol_3x}
+    name_map = {1: f'{symbol_1x} (1x 防守)', 2: f'{symbol_2x} (2x 常态)', 3: f'{symbol_3x} (3x 进攻)'}
 
     # ------------------ 市场状态检测 ------------------
     ny_tz = pytz.timezone('America/New_York')
     now_ny = datetime.now(ny_tz)
     is_market_open = False
 
-    # 简单判断盘中 (周一到周五, 9:30-16:00)
     if 0 <= now_ny.weekday() <= 4:
         if (now_ny.hour > 9 or (now_ny.hour == 9 and now_ny.minute >= 30)) and now_ny.hour < 16:
             is_market_open = True
@@ -76,12 +76,11 @@ def run_strategy_logic():
 
     # ------------------ 数据获取 ------------------
     try:
-        # 下载最近 3 年数据
+        # 修改：下载 10 年数据，以支持“近5年”回测
         raw_data = yf.download(
             [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset], 
-            period="3y", interval="1d", auto_adjust=False, progress=False
+            period="10y", interval="1d", auto_adjust=False, progress=False
         )
-        # yfinance 新版返回多级索引，这里做一下处理以防万一
         if isinstance(raw_data.columns, pd.MultiIndex):
             data = raw_data['Adj Close'].ffill().dropna()
         else:
@@ -89,7 +88,7 @@ def run_strategy_logic():
             
     except Exception as e:
         print(f"❌ 数据下载失败: {e}")
-        return # 数据失败直接结束
+        return 
 
     if not data.empty:
         # ------------------ 指标计算 & 信号重建 ------------------
@@ -155,28 +154,52 @@ def run_strategy_logic():
             if idx >= len(cum_series): idx = len(cum_series) - 1
             return (cum_series.iloc[-1] / cum_series.iloc[idx]) - 1
 
-        # ------------------ 持仓统计 ------------------
-        last_signal = signals[-1]
-        days_held = 0
-        prev_signal = None
-        switch_date = None
+        # ------------------ 历史切换记录 (新增) ------------------
+        # 回溯寻找最近 5 次切换
+        switch_history = []
+        temp_signal = signals[-1]
+        temp_end_idx = len(signals) - 1
         
+        # 倒序遍历寻找切换点
+        for i in range(len(signals) - 2, -1, -1):
+            if signals[i] != temp_signal:
+                # 发现切换
+                prev_sig = signals[i]
+                curr_sig = temp_signal
+                switch_date = data.index[i+1] # 信号生效日（或产生日次日）
+                
+                # 计算这一个波段持有了多久
+                hold_days = temp_end_idx - i 
+                
+                switch_history.append({
+                    'date': switch_date.strftime('%Y-%m-%d'),
+                    'action': f"{etf_map[prev_sig]} -> {etf_map[curr_sig]}",
+                    'days': hold_days
+                })
+                
+                # 重置状态往前找
+                temp_signal = prev_sig
+                temp_end_idx = i
+                
+            if len(switch_history) >= 5:
+                break
+        
+        # ------------------ 当前持仓统计 ------------------
+        last_signal = signals[-1]
+        sig_prev = signals[-2]
+        
+        # 计算当前持仓天数
+        current_held_days = 0
         for i in range(len(signals) - 2, -1, -1):
             if signals[i] == last_signal:
-                days_held += 1
+                current_held_days += 1
             else:
-                prev_signal = signals[i]
-                switch_date = data.index[i+1].strftime('%Y-%m-%d')
                 break
-        days_held += 1 
+        current_held_days += 1
 
-        etf_map = {1: symbol_1x, 2: symbol_2x, 3: symbol_3x}
-        name_map = {1: f'{symbol_1x} (1x 防守)', 2: f'{symbol_2x} (2x 常态)', 3: f'{symbol_3x} (3x 进攻)'}
-        
         price_now = data[indicator_asset].iloc[-1]
         ma_now = sma_200.iloc[-1]
         rsi_now = rsi.iloc[-1]
-        sig_prev = signals[-2]
 
         # ------------------ 输出看板 (Markdown格式) ------------------
         print("\n" + "---")
@@ -194,19 +217,15 @@ def run_strategy_logic():
         elif rsi_now > rsi_sell_3x: rsi_desc = "🔴 风险区 (过热)"
         print(f"- RSI(14): `{rsi_now:.2f}` {rsi_desc}")
 
-        # 模块 B: 持仓统计
-        print(f"\n**【2. 持仓统计】**")
-        print(f"- 当前持有: **{name_map[last_signal]}**")
-        print(f"- 持仓时间: `{days_held}` 个交易日")
-        if prev_signal:
-            print(f"- 上次切换: {switch_date} (从 {etf_map[prev_signal]} 切入)")
-
-        # 模块 C: 业绩回测
-        print(f"\n**【3. 近期业绩PK】**")
+        # 模块 B: 业绩PK (新增3年和5年)
+        print(f"\n**【2. 历史业绩PK】**")
         print("| 区间 | 策略 | QQQ | QLD | TQQQ | SPY |")
         print("|---|---|---|---|---|---|")
         
-        periods = {'近1周': 7, '近1月': 30, '近3月': 90, '近6月': 180, '近1年': 365}
+        periods = {
+            '近1周': 7, '近1月': 30, '近3月': 90, 
+            '近6月': 180, '近1年': 365, '近3年': 1095, '近5年': 1825
+        }
         
         for label, days in periods.items():
             s_ret = get_period_return(strat_cum, days)
@@ -218,14 +237,24 @@ def run_strategy_logic():
             icon = "🔥" if s_ret > b2_ret else " " 
             print(f"| {label} | {icon}{s_ret*100:.1f}% | {b1_ret*100:.1f}% | {b2_ret*100:.1f}% | {b3_ret*100:.1f}% | {spx_ret*100:.1f}% |")
 
+        # 模块 C: 调仓记录 (新增模块)
+        print(f"\n**【3. 最近5次调仓】**")
+        print("| 日期 | 操作方向 | 之前持有 |")
+        print("|---|---|---|")
+        for item in switch_history:
+            print(f"| {item['date']} | {item['action']} | {item['days']}天 |")
+
         # 模块 D: 操作指令
         print(f"\n### 📢 【今日行动指南】")
         
+        print(f"- 当前持有: **{name_map[last_signal]}**")
+        print(f"- 持仓时间: `{current_held_days}` 个交易日")
+
         if last_signal == sig_prev:
-            print(f"#### 🔒 锁仓不动 (HOLD)")
+            print(f"\n#### 🔒 锁仓不动 (HOLD)")
             print(f"策略建议继续持有 **{etf_map[last_signal]}**。")
         else:
-            print(f"#### ⚡⚡⚡ 调仓信号 (ACTION) ⚡⚡⚡")
+            print(f"\n#### ⚡⚡⚡ 调仓信号 (ACTION) ⚡⚡⚡")
             print(f"- 昨日持有: {etf_map[sig_prev]}")
             print(f"- 今日目标: **{etf_map[last_signal]}**")
             print(f"\n👉 **请立即卖出 {etf_map[sig_prev]}，全仓买入 {etf_map[last_signal]}**")
@@ -235,25 +264,16 @@ def run_strategy_logic():
 
 # ================= 2. 主执行入口 =================
 if __name__ == "__main__":
-    # 1. 创建一个 StringIO 对象来捕获输出
     output_buffer = io.StringIO()
-    
-    # 2. 将 stdout 重定向到 buffer
-    # 这样 run_strategy_logic() 里的所有 print 都不会直接打印到屏幕，而是进入 buffer
     try:
         with contextlib.redirect_stdout(output_buffer):
             run_strategy_logic()
     except Exception as e:
-        # 如果策略运行报错，也要捕获错误信息
         output_buffer.write(f"\n\n❌ 程序运行严重错误: {str(e)}")
 
-    # 3. 获取所有输出内容
     final_output = output_buffer.getvalue()
-
-    # 4. 同时打印到控制台 (方便在 GitHub Action 日志里看)
     print(final_output)
 
-    # 5. 发送推送 (提取第一行作为标题的一部分)
     current_date = datetime.now(pytz.timezone('America/New_York')).strftime('%Y-%m-%d')
     title = f"纳指策略日报 ({current_date})"
     
