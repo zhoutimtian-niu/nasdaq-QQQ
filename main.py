@@ -40,20 +40,29 @@ def send_pushplus(title, content):
 
 # ================= 1. 策略逻辑封装 =================
 def run_strategy_logic():
-    # ------------------ 配置参数 ------------------
+    # ------------------ 配置参数 (AI 优化版) ------------------
     symbol_1x = 'QQQ'   
     symbol_2x = 'QLD'   
     symbol_3x = 'TQQQ'
     symbol_spx = 'SPY'
     indicator_asset = '^NDX'
+    vix_asset = '^VIX' # 新增恐慌指数
 
-    # 核心参数 (已修改 RSI 卖出阈值为 75)
-    ma_window = 200
+    # 🔥 核心参数 (基于 Alpha/Sharpe 最优解)
+    # 优化结论: MA 170 | Buy 65 | Sell 80 | VIX 40 | BearBuf 1% | BullBuf 0%
+    ma_window = 170      
     rsi_window = 14
-    rsi_buy_3x = 50     # RSI < 50 进 3x
-    rsi_sell_3x = 75    # RSI > 75 退 2x (原为 80)
-    bear_buffer = 0.0   
-    bull_buffer = 0.005 
+    
+    rsi_buy_3x = 65      # 积极抄底 (原50)
+    rsi_sell_3x = 80     # 让利润奔跑 (原75)
+    
+    # 缓冲区设置
+    bear_buffer = 0.01   # 1% 缓冲 (防假摔，跌破均线1%才离场)
+    bull_buffer = 0.0    # 0% 缓冲 (立刻追，站上均线即买入)
+    
+    # 风控熔断
+    vix_threshold = 40.0 # 极度恐慌熔断线
+
     transaction_cost = 0.001 
 
     etf_map = {1: symbol_1x, 2: symbol_2x, 3: symbol_3x}
@@ -76,15 +85,26 @@ def run_strategy_logic():
 
     # ------------------ 数据获取 ------------------
     try:
-        # 修改：下载 10 年数据，以支持“近5年”回测
+        # 下载数据 (包含 VIX)
+        tickers = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset, vix_asset]
+        print("⏳ 正在下载数据...")
         raw_data = yf.download(
-            [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset], 
+            tickers, 
             period="10y", interval="1d", auto_adjust=False, progress=False
         )
+        
+        # 数据清洗与提取
         if isinstance(raw_data.columns, pd.MultiIndex):
-            data = raw_data['Adj Close'].ffill().dropna()
+            # 提取价格数据 (Adj Close)
+            adj_close = raw_data['Adj Close']
+            data = adj_close[[symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset]].ffill().dropna()
+            # 提取 VIX 数据并对齐索引
+            vix_data = adj_close[vix_asset].reindex(data.index).ffill().fillna(0)
         else:
+            # 容错处理 (单列情况)
             data = raw_data['Adj Close'].ffill().dropna()
+            # 如果下载失败，生成全0的VIX防止报错
+            vix_data = pd.Series(0, index=data.index)
             
     except Exception as e:
         print(f"❌ 数据下载失败: {e}")
@@ -92,8 +112,10 @@ def run_strategy_logic():
 
     if not data.empty:
         # ------------------ 指标计算 & 信号重建 ------------------
-        sma_200 = data[indicator_asset].rolling(window=ma_window).mean()
+        # 1. 均线
+        sma = data[indicator_asset].rolling(window=ma_window).mean()
         
+        # 2. RSI
         delta = data[indicator_asset].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=rsi_window).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_window).mean().replace(0, 1e-10)
@@ -103,26 +125,38 @@ def run_strategy_logic():
         signals = [] 
         current_state = 2 
 
+        # ------------------ 策略核心循环 ------------------
         for i in range(len(data)):
             price = data[indicator_asset].iloc[i]
-            ma = sma_200.iloc[i]
+            ma = sma.iloc[i]
             r = rsi.iloc[i]
+            vix = vix_data.iloc[i]
             
             if pd.isna(ma): 
                 signals.append(2)
                 continue
 
-            if price < ma * (1 - bear_buffer):
+            # 优先级 1: VIX 熔断 (极度恐慌时强制防守)
+            if vix > vix_threshold:
+                current_state = 1
+            
+            # 优先级 2: 均线大势 (熊市防守)
+            # 使用 bear_buffer (0.01): 只有跌破均线 1% 才离场
+            elif price < ma * (1 - bear_buffer):
                 current_state = 1 
+                
+            # 优先级 3: 牛市/震荡逻辑
             else:
                 if current_state == 1:
+                    # 刚从熊市回来，使用 bull_buffer (0.0): 站上均线立刻买
                     if price > ma * (1 + bull_buffer):
                         current_state = 2
                 else:
+                    # 已经在牛市，RSI 择时
                     if r > rsi_sell_3x:
-                        current_state = 2
+                        current_state = 2 # 超买，降杠杆
                     elif r < rsi_buy_3x:
-                        current_state = 3
+                        current_state = 3 # 抄底，上杠杆
             
             signals.append(current_state)
 
@@ -138,9 +172,11 @@ def run_strategy_logic():
         strat_daily_ret[pos_series == 2] = ret_2x
         strat_daily_ret[pos_series == 3] = ret_3x
         
+        # 扣除滑点
         trades = (pos_series != pos_series.shift(1)).astype(int)
         strat_daily_ret -= (trades * transaction_cost)
         
+        # 累计净值
         strat_cum = (1 + strat_daily_ret).cumprod()
         bench_cum_1x = (1 + ret_1x).cumprod()
         bench_cum_2x = (1 + ret_2x).cumprod()
@@ -150,25 +186,21 @@ def run_strategy_logic():
         def get_period_return(cum_series, days_lookback):
             if len(cum_series) < days_lookback: return 0.0
             target_date = cum_series.index[-1] - timedelta(days=days_lookback)
+            # 寻找最近的交易日索引
             idx = cum_series.index.searchsorted(target_date)
             if idx >= len(cum_series): idx = len(cum_series) - 1
             return (cum_series.iloc[-1] / cum_series.iloc[idx]) - 1
 
-        # ------------------ 历史切换记录 (新增) ------------------
-        # 回溯寻找最近 5 次切换
+        # ------------------ 历史切换记录 ------------------
         switch_history = []
         temp_signal = signals[-1]
         temp_end_idx = len(signals) - 1
         
-        # 倒序遍历寻找切换点
         for i in range(len(signals) - 2, -1, -1):
             if signals[i] != temp_signal:
-                # 发现切换
                 prev_sig = signals[i]
                 curr_sig = temp_signal
-                switch_date = data.index[i+1] # 信号生效日（或产生日次日）
-                
-                # 计算这一个波段持有了多久
+                switch_date = data.index[i+1]
                 hold_days = temp_end_idx - i 
                 
                 switch_history.append({
@@ -177,10 +209,8 @@ def run_strategy_logic():
                     'days': hold_days
                 })
                 
-                # 重置状态往前找
                 temp_signal = prev_sig
                 temp_end_idx = i
-                
             if len(switch_history) >= 5:
                 break
         
@@ -188,7 +218,6 @@ def run_strategy_logic():
         last_signal = signals[-1]
         sig_prev = signals[-2]
         
-        # 计算当前持仓天数
         current_held_days = 0
         for i in range(len(signals) - 2, -1, -1):
             if signals[i] == last_signal:
@@ -198,33 +227,46 @@ def run_strategy_logic():
         current_held_days += 1
 
         price_now = data[indicator_asset].iloc[-1]
-        ma_now = sma_200.iloc[-1]
+        ma_now = sma.iloc[-1]
         rsi_now = rsi.iloc[-1]
+        vix_now = vix_data.iloc[-1]
 
         # ------------------ 输出看板 (Markdown格式) ------------------
         print("\n" + "---")
-        print(f"### 📊 策略决策看板")
+        print(f"### 📊 策略决策看板 (AI Optimized)")
         
         # 模块 A: 市场体检
         print(f"**【1. 市场体检】**")
-        print(f"- 纳指价格: `{price_now:.2f}`")
-        print(f"- 200日线: `{ma_now:.2f}`")
-        if price_now < ma_now: print("- 趋势: ❌ **熊市 (均线下方)**")
-        else: print("- 趋势: ✅ **牛市 (均线上方)**")
+        print(f"- 纳指价格: `{price_now:.2f}` (MA{ma_window}: `{ma_now:.2f}`)")
         
+        # 趋势描述
+        if price_now < ma_now * (1 - bear_buffer): 
+            trend_status = "❌ 熊市 (跌破缓冲线)"
+        elif price_now < ma_now:
+            trend_status = "⚠️ 震荡 (均线下方但未破防)"
+        else: 
+            trend_status = "✅ 牛市 (均线上方)"
+        print(f"- 趋势状态: {trend_status}")
+        
+        # RSI 描述
         rsi_desc = "⚪ 震荡区"
         if rsi_now < rsi_buy_3x: rsi_desc = "🔵 机会区 (回调)"
         elif rsi_now > rsi_sell_3x: rsi_desc = "🔴 风险区 (过热)"
         print(f"- RSI(14): `{rsi_now:.2f}` {rsi_desc}")
+        
+        # VIX 描述
+        vix_icon = "🟢" if vix_now < 30 else "🔴" if vix_now > vix_threshold else "🟡"
+        print(f"- VIX恐慌: `{vix_now:.2f}` {vix_icon} (熔断线: {vix_threshold})")
 
-        # 模块 B: 业绩PK (新增3年和5年)
+        # 模块 B: 业绩PK (含10年)
         print(f"\n**【2. 历史业绩PK】**")
         print("| 区间 | 策略 | QQQ | QLD | TQQQ | SPY |")
         print("|---|---|---|---|---|---|")
         
         periods = {
             '近1周': 7, '近1月': 30, '近3月': 90, 
-            '近6月': 180, '近1年': 365, '近3年': 1095, '近5年': 1825
+            '近6月': 180, '近1年': 365, '近3年': 1095, '近5年': 1825,
+            '近10年': 3650
         }
         
         for label, days in periods.items():
@@ -234,17 +276,53 @@ def run_strategy_logic():
             b3_ret = get_period_return(bench_cum_3x, days)
             spx_ret = get_period_return(bench_cum_spx, days)
             
-            icon = "🔥" if s_ret > b2_ret else " " 
-            print(f"| {label} | {icon}{s_ret*100:.1f}% | {b1_ret*100:.1f}% | {b2_ret*100:.1f}% | {b3_ret*100:.1f}% | {spx_ret*100:.1f}% |")
+            # 如果数据长度不足，显示 N/A
+            if len(data) < days * 0.6: # 简单判断
+                print(f"| {label} | N/A | ... | ... | ... | ... |")
+            else:
+                icon = "🔥" if s_ret > b2_ret else " " 
+                print(f"| {label} | {icon}{s_ret*100:.1f}% | {b1_ret*100:.1f}% | {b2_ret*100:.1f}% | {b3_ret*100:.1f}% | {spx_ret*100:.1f}% |")
 
-        # 模块 C: 调仓记录 (新增模块)
+        # 模块 C: 调仓记录
         print(f"\n**【3. 最近5次调仓】**")
         print("| 日期 | 操作方向 | 之前持有 |")
         print("|---|---|---|")
         for item in switch_history:
             print(f"| {item['date']} | {item['action']} | {item['days']}天 |")
 
-        # 模块 D: 操作指令
+        # 模块 D: 分年度详细战报 (新增!)
+        print(f"\n**【4. 分年度详细战报 (过去10年)】**")
+        print("| 年份 | 策略 | QQQ | QLD | TQQQ | 评价 |")
+        print("|---|---|---|---|---|---|")
+        
+        # 构造年度统计 DataFrame
+        df_perf = pd.DataFrame({
+            'Strategy': strat_daily_ret,
+            'QQQ': ret_1x,
+            'QLD': ret_2x,
+            'TQQQ': ret_3x
+        })
+        
+        years = df_perf.index.year.unique()
+        # 倒序排列，最近的年份在前面 (或者正序，看个人喜好，这里用正序符合阅读习惯)
+        for year in sorted(years):
+            # 获取当年的数据
+            df_year = df_perf[df_perf.index.year == year]
+            # 计算当年总收益
+            y_strat = (1 + df_year['Strategy']).prod() - 1
+            y_qqq = (1 + df_year['QQQ']).prod() - 1
+            y_qld = (1 + df_year['QLD']).prod() - 1
+            y_tqqq = (1 + df_year['TQQQ']).prod() - 1
+            
+            # 评价标签
+            tag = ""
+            if y_strat > y_tqqq: tag = "🔥完胜"
+            elif y_tqqq < -0.2 and y_strat > y_tqqq + 0.15: tag = "🛡️避险"
+            elif y_strat < y_qld: tag = "⚠️跑输"
+            
+            print(f"| {year} | {y_strat*100:6.1f}% | {y_qqq*100:6.1f}% | {y_qld*100:6.1f}% | {y_tqqq*100:6.1f}% | {tag} |")
+
+        # 模块 E: 操作指令
         print(f"\n### 📢 【今日行动指南】")
         
         print(f"- 当前持有: **{name_map[last_signal]}**")
