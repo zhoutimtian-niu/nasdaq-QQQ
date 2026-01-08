@@ -17,7 +17,6 @@ def send_pushplus(title, content):
         return
 
     url = 'http://www.pushplus.plus/send'
-    # 微信显示优化: 换行符替换
     content = content.replace('\n', '\n\n') 
     
     data = {
@@ -46,7 +45,7 @@ def run_strategy_logic():
     indicator_asset = '^NDX'
     vix_asset = '^VIX'
 
-    # 🔥 核心参数 (AI 优化版)
+    # 🔥 核心参数 (AI 优化版: MA170, 65/80, VIX40)
     ma_window = 170      
     rsi_window = 14
     rsi_buy_3x = 65      
@@ -74,7 +73,6 @@ def run_strategy_logic():
     # ------------------ 数据获取 ------------------
     try:
         print("⏳ 正在下载数据 (Max)...")
-        # 改为 max 以确保计算 10 年数据
         raw_data = yf.download(
             [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset, vix_asset], 
             period="max", interval="1d", auto_adjust=False, progress=False
@@ -85,15 +83,13 @@ def run_strategy_logic():
             data = adj[[symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset]].ffill().dropna()
             vix_data = adj[vix_asset].reindex(data.index).ffill().fillna(0)
         else:
-            # 容错单列
             data = raw_data['Adj Close'].ffill().dropna()
             vix_data = pd.Series(0, index=data.index)
             
-        # 截取最近 10 年 + buffer (用于计算)
-        # 至少保留 3000 天用于计算指标和回测
-        if len(data) > 3000:
-            data = data.iloc[-3000:]
-            vix_data = vix_data.iloc[-3000:]
+        # 确保数据足够计算 MA170
+        if len(data) < 200:
+            print("❌ 数据过短，无法计算指标")
+            return
 
     except Exception as e:
         print(f"❌ 数据下载失败: {e}")
@@ -155,25 +151,23 @@ def run_strategy_logic():
         bench_cum_3x = (1 + ret_3x).cumprod()
         bench_cum_spx = (1 + ret_spx).cumprod()
 
+        # 🔥 修复版 get_period_return
         def get_period_return(cum_series, days_lookback):
-            # 只有当数据长度足够时才计算
-            if len(cum_series) <= days_lookback: return None 
+            if len(cum_series) == 0: return 0.0
             
-            # 使用真实交易日计算 (美股一年约252天)
-            # days_lookback 是日历天数，转换为交易日索引
-            # 简单估算：日历天数 * (252/365)
-            # 为了更精准，直接用 date search
+            # 目标日期
             target_date = cum_series.index[-1] - timedelta(days=days_lookback)
             
-            # 确保 target_date 不早于数据起始日期
+            # 如果目标日期早于数据开始日期，就用数据第一天 (计算 Max available 收益)
             if target_date < cum_series.index[0]:
-                target_date = cum_series.index[0]
+                start_val = cum_series.iloc[0]
+            else:
+                # 寻找最近的交易日
+                idx = cum_series.index.searchsorted(target_date)
+                if idx >= len(cum_series): idx = len(cum_series) - 1
+                start_val = cum_series.iloc[idx]
             
-            idx = cum_series.index.searchsorted(target_date)
-            # 如果 idx 越界，修正
-            if idx >= len(cum_series): idx = len(cum_series) - 1
-            
-            return (cum_series.iloc[-1] / cum_series.iloc[idx]) - 1
+            return (cum_series.iloc[-1] / start_val) - 1
 
         # ------------------ 调仓记录 ------------------
         switch_history = []
@@ -190,7 +184,6 @@ def run_strategy_logic():
                 temp_end_idx = i
             if len(switch_history) >= 5: break
         
-        # 持仓统计
         last_signal = signals[-1]
         sig_prev = signals[-2]
         current_held_days = 0
@@ -225,9 +218,9 @@ def run_strategy_logic():
         print(f"- VIX恐慌: `{vix_now:.2f}` {vix_icon} (熔断: {vix_threshold})")
 
         print(f"\n**【2. 历史业绩PK】**")
-        # 格式化字符串，确保对齐 (Markdown表格)
-        print("| 区间 | 策略 | QQQ | QLD | TQQQ | SPY |")
-        print("|---|---|---|---|---|---|")
+        # 🔥 优化表格格式，增加空格填充以尝试在控制台对齐，Markdown会自动处理
+        print("| 区间    | 策略    | QQQ    | QLD    | TQQQ   | SPY    |")
+        print("|-------|-------|-------|-------|-------|-------|")
         
         periods = {
             '近1周': 7, '近1月': 30, '近3月': 90, 
@@ -243,23 +236,24 @@ def run_strategy_logic():
             spx = get_period_return(bench_cum_spx, days)
             
             def fmt(val): 
-                return f"{val*100:.1f}%" if val is not None else "N/A"
+                if val is None: return "N/A"
+                return f"{val*100:.1f}%"
             
-            icon = "🔥" if (s is not None and b2 is not None and s > b2) else " " 
-            print(f"| {label} | {icon}{fmt(s)} | {fmt(b1)} | {fmt(b2)} | {fmt(b3)} | {fmt(spx)} |")
+            icon = "🔥" if (s is not None and b2 is not None and s > b2) else " "
+            # ljust/rjust 用于简单的控制台对齐
+            print(f"| {label:<5} | {icon}{fmt(s):<6} | {fmt(b1):<6} | {fmt(b2):<6} | {fmt(b3):<6} | {fmt(spx):<6} |")
 
         print(f"\n**【3. 最近5次调仓】**")
-        print("| 日期 | 操作方向 | 之前持有 |")
-        print("|---|---|---|")
+        print("| 日期       | 操作方向         | 之前持有 |")
+        print("|------------|----------------|---------|")
         for item in switch_history:
-            print(f"| {item['date']} | {item['action']} | {item['days']}天 |")
+            print(f"| {item['date']} | {item['action']:<14} | {item['days']}天   |")
 
         print(f"\n**【4. 分年度详细战报 (过去10年)】**")
-        print("| 年份 | 策略 | QQQ | QLD | TQQQ | 评价 |")
-        print("|---|---|---|---|---|---|")
+        print("| 年份 | 策略    | QQQ    | QLD    | TQQQ   | 评价   |")
+        print("|-----|-------|-------|-------|-------|-------|")
         
         df_perf = pd.DataFrame({'S':strat_daily_ret, 'Q':ret_1x, '2x':ret_2x, '3x':ret_3x})
-        # 只取最近10年
         current_year = datetime.now().year
         start_year = current_year - 10
         df_perf = df_perf[df_perf.index.year >= start_year]
@@ -271,12 +265,14 @@ def run_strategy_logic():
             y_2x = (1 + sub['2x']).prod() - 1
             y_3x = (1 + sub['3x']).prod() - 1
             
-            tag = ""
+            # 🔥 修复逻辑漏洞，覆盖所有情况
+            tag = "✅达标" # 默认跑赢 2x 算达标
             if y_s > y_3x: tag = "🔥完胜"
             elif y_3x < -0.2 and y_s > y_3x + 0.15: tag = "🛡️避险"
             elif y_s < y_2x: tag = "⚠️跑输"
+            elif y_s > y_2x and y_s < y_3x: tag = "✅不错" # 介于 2x 和 3x 之间
             
-            print(f"| {year} | {y_s*100:.1f}% | {y_q*100:.1f}% | {y_2x*100:.1f}% | {y_3x*100:.1f}% | {tag} |")
+            print(f"| {year} | {y_s*100:<6.1f}% | {y_q*100:<6.1f}% | {y_2x*100:<6.1f}% | {y_3x*100:<6.1f}% | {tag:<4} |")
 
         print(f"\n### 📢 【今日行动指南】")
         print(f"- 当前持有: **{name_map[last_signal]}**")
