@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import pytz
+import traceback
 
 # ================= 0. 推送配置函数 =================
 def send_pushplus(title, content):
@@ -17,6 +18,7 @@ def send_pushplus(title, content):
         return
 
     url = 'http://www.pushplus.plus/send'
+    # 简单处理换行，保证Markdown在微信显示好看
     content = content.replace('\n', '\n\n') 
     
     data = {
@@ -42,10 +44,10 @@ def run_strategy_logic():
     symbol_2x = 'QLD'   
     symbol_3x = 'TQQQ'
     symbol_spx = 'SPY'
-    indicator_asset = '^NDX'
-    vix_asset = '^VIX'
+    indicator_asset = '^NDX' # 纳指100指数
+    vix_asset = '^VIX'       # 恐慌指数
 
-    # 🔥 核心参数 (AI 优化版: MA170, 65/80, VIX40)
+    # 🔥 核心参数
     ma_window = 170      
     rsi_window = 14
     rsi_buy_3x = 65      
@@ -70,33 +72,79 @@ def run_strategy_logic():
     if is_market_open: print("**🔔 状态: 美股【交易中】**")
     else: print("**💤 状态: 美股【已收盘/盘前】**")
 
-    # ------------------ 数据获取 ------------------
+    # ------------------ 数据获取 (修复增强版) ------------------
     try:
         print("⏳ 正在下载数据 (Max)...")
+        tickers = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset, vix_asset]
+        
+        # 批量下载
         raw_data = yf.download(
-            [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset, vix_asset], 
+            tickers, 
             period="max", interval="1d", auto_adjust=False, progress=False
         )
         
+        # 🛠️ 兼容性处理：提取收盘价
+        # yfinance 新版返回的是 (Price, Ticker) 的多层索引
+        adj_close = pd.DataFrame()
+        
         if isinstance(raw_data.columns, pd.MultiIndex):
-            adj = raw_data['Adj Close']
-            data = adj[[symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset]].ffill().dropna()
-            vix_data = adj[vix_asset].reindex(data.index).ffill().fillna(0)
+            # 优先尝试获取 Adj Close，没有则获取 Close
+            try:
+                adj_close = raw_data['Adj Close']
+            except KeyError:
+                print("⚠️ 未找到 Adj Close，降级使用 Close")
+                adj_close = raw_data['Close']
         else:
-            data = raw_data['Adj Close'].ffill().dropna()
+            # 旧版兼容
+            adj_close = raw_data['Adj Close'] if 'Adj Close' in raw_data else raw_data['Close']
+
+        # 🔍 诊断信息 (打印到日志，方便Github Action排查)
+        print("\n🔍 数据完整性自检:")
+        download_success = True
+        for t in tickers:
+            if t not in adj_close.columns:
+                print(f"   ❌ 失败: [{t}] 列不存在")
+                download_success = False
+            else:
+                count = adj_close[t].dropna().shape[0]
+                if count < 10:
+                    print(f"   ❌ 失败: [{t}] 数据量过少 ({count}行)")
+                    download_success = False
+                else:
+                    print(f"   ✅ 成功: [{t}] 获取 {count} 行")
+
+        # 🛑 核心资产检查 (VIX除外)
+        core_assets = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset]
+        for asset in core_assets:
+            if asset not in adj_close.columns or adj_close[asset].dropna().empty:
+                print(f"\n❌ 严重错误: 核心资产 [{asset}] 下载失败，策略无法运行。")
+                return
+
+        # 🧹 数据清洗
+        # 1. 提取核心数据并清洗
+        data = adj_close[core_assets].ffill().dropna()
+        
+        # 2. VIX 单独处理 (容错：如果VIX没下下来，默认补0，不阻断策略)
+        if vix_asset in adj_close.columns:
+            vix_data = adj_close[vix_asset].reindex(data.index).ffill().fillna(0)
+        else:
+            print(f"⚠️ 警告: [{vix_asset}] 缺失，VIX风控将失效 (默认为0)。")
             vix_data = pd.Series(0, index=data.index)
-            
-        # 确保数据足够计算 MA170
+
+        print(f"📊 最终有效交易天数: {len(data)}")
+        
         if len(data) < 200:
-            print("❌ 数据过短，无法计算指标")
+            print("❌ 数据清洗后长度不足200天，无法计算长周期均线。")
             return
 
     except Exception as e:
-        print(f"❌ 数据下载失败: {e}")
+        print(f"❌ 数据处理发生异常: {e}")
+        traceback.print_exc()
         return 
 
+    # ================= 策略逻辑开始 =================
     if not data.empty:
-        # ------------------ 策略计算 ------------------
+        # 1. 指标计算
         sma = data[indicator_asset].rolling(window=ma_window).mean()
         delta = data[indicator_asset].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=rsi_window).mean()
@@ -107,32 +155,37 @@ def run_strategy_logic():
         signals = [] 
         current_state = 2 
 
+        # 2. 信号生成循环
         for i in range(len(data)):
             price = data[indicator_asset].iloc[i]
             ma = sma.iloc[i]
             r = rsi.iloc[i]
             vix = vix_data.iloc[i]
             
+            # MA无效时保持常态
             if pd.isna(ma): 
                 signals.append(2)
                 continue
 
+            # 状态机逻辑
             if vix > vix_threshold:
-                current_state = 1
+                current_state = 1 # 恐慌 -> 防守
             elif price < ma * (1 - bear_buffer):
-                current_state = 1 
+                current_state = 1 # 熊市 -> 防守
             else:
                 if current_state == 1:
+                    # 熊转牛/震荡: 需要站稳缓冲带
                     if price > ma * (1 + bull_buffer):
                         current_state = 2
                 else:
+                    # 牛市/震荡内部切换
                     if r > rsi_sell_3x:
-                        current_state = 2 
+                        current_state = 2 # 超买 -> 降杠杆
                     elif r < rsi_buy_3x:
-                        current_state = 3 
+                        current_state = 3 # 超卖 -> 上杠杆
             signals.append(current_state)
 
-        # ------------------ 收益回测 ------------------
+        # 3. 收益回测
         ret_1x = data[symbol_1x].pct_change().fillna(0)
         ret_2x = data[symbol_2x].pct_change().fillna(0)
         ret_3x = data[symbol_3x].pct_change().fillna(0)
@@ -143,36 +196,36 @@ def run_strategy_logic():
         strat_daily_ret[pos_series == 1] = ret_1x
         strat_daily_ret[pos_series == 2] = ret_2x
         strat_daily_ret[pos_series == 3] = ret_3x
-        strat_daily_ret -= ((pos_series != pos_series.shift(1)).astype(int) * transaction_cost)
         
+        # 扣除调仓成本
+        trades = (pos_series != pos_series.shift(1)).astype(int)
+        strat_daily_ret -= (trades * transaction_cost)
+        
+        # 累计净值
         strat_cum = (1 + strat_daily_ret).cumprod()
         bench_cum_1x = (1 + ret_1x).cumprod()
         bench_cum_2x = (1 + ret_2x).cumprod()
         bench_cum_3x = (1 + ret_3x).cumprod()
         bench_cum_spx = (1 + ret_spx).cumprod()
 
-        # 🔥 修复版 get_period_return
+        # 辅助函数: 计算区间收益
         def get_period_return(cum_series, days_lookback):
             if len(cum_series) == 0: return 0.0
-            
-            # 目标日期
             target_date = cum_series.index[-1] - timedelta(days=days_lookback)
-            
-            # 如果目标日期早于数据开始日期，就用数据第一天 (计算 Max available 收益)
             if target_date < cum_series.index[0]:
                 start_val = cum_series.iloc[0]
             else:
-                # 寻找最近的交易日
+                # 找最近的交易日
                 idx = cum_series.index.searchsorted(target_date)
                 if idx >= len(cum_series): idx = len(cum_series) - 1
                 start_val = cum_series.iloc[idx]
-            
             return (cum_series.iloc[-1] / start_val) - 1
 
         # ------------------ 调仓记录 ------------------
         switch_history = []
         temp_signal = signals[-1]
         temp_end_idx = len(signals) - 1
+        # 倒序查找最近5次
         for i in range(len(signals) - 2, -1, -1):
             if signals[i] != temp_signal:
                 switch_history.append({
@@ -184,6 +237,7 @@ def run_strategy_logic():
                 temp_end_idx = i
             if len(switch_history) >= 5: break
         
+        # 计算当前持仓天数
         last_signal = signals[-1]
         sig_prev = signals[-2]
         current_held_days = 0
@@ -218,7 +272,6 @@ def run_strategy_logic():
         print(f"- VIX恐慌: `{vix_now:.2f}` {vix_icon} (熔断: {vix_threshold})")
 
         print(f"\n**【2. 历史业绩PK】**")
-        # 🔥 优化表格格式，增加空格填充以尝试在控制台对齐，Markdown会自动处理
         print("| 区间    | 策略    | QQQ    | QLD    | TQQQ   | SPY    |")
         print("|-------|-------|-------|-------|-------|-------|")
         
@@ -240,7 +293,6 @@ def run_strategy_logic():
                 return f"{val*100:.1f}%"
             
             icon = "🔥" if (s is not None and b2 is not None and s > b2) else " "
-            # ljust/rjust 用于简单的控制台对齐
             print(f"| {label:<5} | {icon}{fmt(s):<6} | {fmt(b1):<6} | {fmt(b2):<6} | {fmt(b3):<6} | {fmt(spx):<6} |")
 
         print(f"\n**【3. 最近5次调仓】**")
@@ -265,12 +317,11 @@ def run_strategy_logic():
             y_2x = (1 + sub['2x']).prod() - 1
             y_3x = (1 + sub['3x']).prod() - 1
             
-            # 🔥 修复逻辑漏洞，覆盖所有情况
-            tag = "✅达标" # 默认跑赢 2x 算达标
+            tag = "✅达标" 
             if y_s > y_3x: tag = "🔥完胜"
             elif y_3x < -0.2 and y_s > y_3x + 0.15: tag = "🛡️避险"
             elif y_s < y_2x: tag = "⚠️跑输"
-            elif y_s > y_2x and y_s < y_3x: tag = "✅不错" # 介于 2x 和 3x 之间
+            elif y_s > y_2x and y_s < y_3x: tag = "✅不错"
             
             print(f"| {year} | {y_s*100:<6.1f}% | {y_q*100:<6.1f}% | {y_2x*100:<6.1f}% | {y_3x*100:<6.1f}% | {tag:<4} |")
 
@@ -288,20 +339,23 @@ def run_strategy_logic():
             print(f"\n👉 **请立即卖出 {etf_map[sig_prev]}，全仓买入 {etf_map[last_signal]}**")
 
     else:
-        print("❌ 错误: 无法获取数据")
+        print("❌ 错误: 有效数据为空")
 
 # ================= 2. 主执行入口 =================
 if __name__ == "__main__":
     output_buffer = io.StringIO()
     try:
+        # 捕获 print 输出
         with contextlib.redirect_stdout(output_buffer):
             run_strategy_logic()
     except Exception as e:
-        output_buffer.write(f"\n\n❌ 程序运行严重错误: {str(e)}")
+        output_buffer.write(f"\n\n❌ 程序主逻辑崩溃: {str(e)}\n")
+        traceback.print_exc(file=output_buffer)
 
     final_output = output_buffer.getvalue()
-    print(final_output)
+    print(final_output) # 在控制台打印一遍，方便看 Log
 
+    # 发送推送
     current_date = datetime.now(pytz.timezone('America/New_York')).strftime('%Y-%m-%d')
     title = f"纳指策略日报 ({current_date})"
     
