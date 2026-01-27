@@ -9,6 +9,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import pytz
 import traceback
+import time  # 引入时间库用于重试等待
 
 # ================= 0. 推送配置函数 =================
 def send_pushplus(title, content):
@@ -18,7 +19,6 @@ def send_pushplus(title, content):
         return
 
     url = 'http://www.pushplus.plus/send'
-    # 简单处理换行，保证Markdown在微信显示好看
     content = content.replace('\n', '\n\n') 
     
     data = {
@@ -44,8 +44,8 @@ def run_strategy_logic():
     symbol_2x = 'QLD'   
     symbol_3x = 'TQQQ'
     symbol_spx = 'SPY'
-    indicator_asset = '^NDX' # 纳指100指数
-    vix_asset = '^VIX'       # 恐慌指数
+    indicator_asset = '^NDX' 
+    vix_asset = '^VIX'       
 
     # 🔥 核心参数
     ma_window = 170      
@@ -72,75 +72,75 @@ def run_strategy_logic():
     if is_market_open: print("**🔔 状态: 美股【交易中】**")
     else: print("**💤 状态: 美股【已收盘/盘前】**")
 
-    # ------------------ 数据获取 (修复增强版) ------------------
-    try:
-        print("⏳ 正在下载数据 (Max)...")
-        tickers = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset, vix_asset]
-        
-        # 批量下载
-        raw_data = yf.download(
-            tickers, 
-            period="max", interval="1d", auto_adjust=False, progress=False
-        )
-        
-        # 🛠️ 兼容性处理：提取收盘价
-        # yfinance 新版返回的是 (Price, Ticker) 的多层索引
-        adj_close = pd.DataFrame()
-        
-        if isinstance(raw_data.columns, pd.MultiIndex):
-            # 优先尝试获取 Adj Close，没有则获取 Close
-            try:
-                adj_close = raw_data['Adj Close']
-            except KeyError:
-                print("⚠️ 未找到 Adj Close，降级使用 Close")
-                adj_close = raw_data['Close']
-        else:
-            # 旧版兼容
-            adj_close = raw_data['Adj Close'] if 'Adj Close' in raw_data else raw_data['Close']
-
-        # 🔍 诊断信息 (打印到日志，方便Github Action排查)
-        print("\n🔍 数据完整性自检:")
-        download_success = True
-        for t in tickers:
-            if t not in adj_close.columns:
-                print(f"   ❌ 失败: [{t}] 列不存在")
-                download_success = False
+    # ------------------ 数据获取 (含自动重试机制) ------------------
+    tickers = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset, vix_asset]
+    core_assets = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset]
+    
+    data = pd.DataFrame()
+    vix_data = pd.Series()
+    
+    # 🔥 重试配置
+    max_retries = 5  # 最多重试5次
+    retry_delay = 15 # 每次失败等待15秒
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"\n⏳ 正在下载数据 (第 {attempt + 1}/{max_retries} 次尝试)...")
+            
+            # 批量下载
+            raw_data = yf.download(
+                tickers, 
+                period="max", interval="1d", auto_adjust=False, progress=False
+            )
+            
+            # 兼容性提取
+            adj_close = pd.DataFrame()
+            if isinstance(raw_data.columns, pd.MultiIndex):
+                try:
+                    adj_close = raw_data['Adj Close']
+                except KeyError:
+                    adj_close = raw_data['Close']
             else:
-                count = adj_close[t].dropna().shape[0]
-                if count < 10:
-                    print(f"   ❌ 失败: [{t}] 数据量过少 ({count}行)")
-                    download_success = False
+                adj_close = raw_data['Adj Close'] if 'Adj Close' in raw_data else raw_data['Close']
+
+            # --- 核心完整性检查 ---
+            is_valid = True
+            missing_assets = []
+            
+            for asset in core_assets:
+                if asset not in adj_close.columns or adj_close[asset].dropna().shape[0] < 100:
+                    is_valid = False
+                    missing_assets.append(asset)
+            
+            if is_valid:
+                print("✅ 数据完整性校验通过！")
+                # 提取数据
+                data = adj_close[core_assets].ffill().dropna()
+                
+                # VIX 处理
+                if vix_asset in adj_close.columns:
+                    vix_data = adj_close[vix_asset].reindex(data.index).ffill().fillna(0)
                 else:
-                    print(f"   ✅ 成功: [{t}] 获取 {count} 行")
+                    vix_data = pd.Series(0, index=data.index)
+                
+                break # 成功了，跳出循环！
+            else:
+                print(f"❌ 本次下载失败，缺失核心数据或数据过短: {missing_assets}")
+                if attempt < max_retries - 1:
+                    print(f"💤 等待 {retry_delay} 秒后重试...")
+                    time.sleep(retry_delay)
+                else:
+                    print("❌ 重试次数用尽，放弃。")
+                    # 主动抛出异常，触发 GitHub Action 报错
+                    raise ValueError(f"核心资产下载失败: {missing_assets}")
 
-        # 🛑 核心资产检查 (VIX除外)
-        core_assets = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset]
-        for asset in core_assets:
-            if asset not in adj_close.columns or adj_close[asset].dropna().empty:
-                print(f"\n❌ 严重错误: 核心资产 [{asset}] 下载失败，策略无法运行。")
-                return
-
-        # 🧹 数据清洗
-        # 1. 提取核心数据并清洗
-        data = adj_close[core_assets].ffill().dropna()
-        
-        # 2. VIX 单独处理 (容错：如果VIX没下下来，默认补0，不阻断策略)
-        if vix_asset in adj_close.columns:
-            vix_data = adj_close[vix_asset].reindex(data.index).ffill().fillna(0)
-        else:
-            print(f"⚠️ 警告: [{vix_asset}] 缺失，VIX风控将失效 (默认为0)。")
-            vix_data = pd.Series(0, index=data.index)
-
-        print(f"📊 最终有效交易天数: {len(data)}")
-        
-        if len(data) < 200:
-            print("❌ 数据清洗后长度不足200天，无法计算长周期均线。")
-            return
-
-    except Exception as e:
-        print(f"❌ 数据处理发生异常: {e}")
-        traceback.print_exc()
-        return 
+        except Exception as e:
+            print(f"⚠️ 下载过程发生异常: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+            else:
+                print("❌ 最终失败。")
+                return # 结束程序
 
     # ================= 策略逻辑开始 =================
     if not data.empty:
@@ -162,27 +162,23 @@ def run_strategy_logic():
             r = rsi.iloc[i]
             vix = vix_data.iloc[i]
             
-            # MA无效时保持常态
             if pd.isna(ma): 
                 signals.append(2)
                 continue
 
-            # 状态机逻辑
             if vix > vix_threshold:
-                current_state = 1 # 恐慌 -> 防守
+                current_state = 1 
             elif price < ma * (1 - bear_buffer):
-                current_state = 1 # 熊市 -> 防守
+                current_state = 1 
             else:
                 if current_state == 1:
-                    # 熊转牛/震荡: 需要站稳缓冲带
                     if price > ma * (1 + bull_buffer):
                         current_state = 2
                 else:
-                    # 牛市/震荡内部切换
                     if r > rsi_sell_3x:
-                        current_state = 2 # 超买 -> 降杠杆
+                        current_state = 2 
                     elif r < rsi_buy_3x:
-                        current_state = 3 # 超卖 -> 上杠杆
+                        current_state = 3 
             signals.append(current_state)
 
         # 3. 收益回测
@@ -197,25 +193,21 @@ def run_strategy_logic():
         strat_daily_ret[pos_series == 2] = ret_2x
         strat_daily_ret[pos_series == 3] = ret_3x
         
-        # 扣除调仓成本
         trades = (pos_series != pos_series.shift(1)).astype(int)
         strat_daily_ret -= (trades * transaction_cost)
         
-        # 累计净值
         strat_cum = (1 + strat_daily_ret).cumprod()
         bench_cum_1x = (1 + ret_1x).cumprod()
         bench_cum_2x = (1 + ret_2x).cumprod()
         bench_cum_3x = (1 + ret_3x).cumprod()
         bench_cum_spx = (1 + ret_spx).cumprod()
 
-        # 辅助函数: 计算区间收益
         def get_period_return(cum_series, days_lookback):
             if len(cum_series) == 0: return 0.0
             target_date = cum_series.index[-1] - timedelta(days=days_lookback)
             if target_date < cum_series.index[0]:
                 start_val = cum_series.iloc[0]
             else:
-                # 找最近的交易日
                 idx = cum_series.index.searchsorted(target_date)
                 if idx >= len(cum_series): idx = len(cum_series) - 1
                 start_val = cum_series.iloc[idx]
@@ -225,7 +217,6 @@ def run_strategy_logic():
         switch_history = []
         temp_signal = signals[-1]
         temp_end_idx = len(signals) - 1
-        # 倒序查找最近5次
         for i in range(len(signals) - 2, -1, -1):
             if signals[i] != temp_signal:
                 switch_history.append({
@@ -237,7 +228,6 @@ def run_strategy_logic():
                 temp_end_idx = i
             if len(switch_history) >= 5: break
         
-        # 计算当前持仓天数
         last_signal = signals[-1]
         sig_prev = signals[-2]
         current_held_days = 0
@@ -337,15 +327,16 @@ def run_strategy_logic():
             print(f"- 昨日持有: {etf_map[sig_prev]}")
             print(f"- 今日目标: **{etf_map[last_signal]}**")
             print(f"\n👉 **请立即卖出 {etf_map[sig_prev]}，全仓买入 {etf_map[last_signal]}**")
-
+    
     else:
-        print("❌ 错误: 有效数据为空")
+        print("❌ 严重错误: 重试多次后依然无法获取数据，请检查 Github Action 网络或 Yahoo 接口。")
+        # 主动退出，标记 Action 为失败，以便 Github 可能自动重试（如果配置了的话）
+        sys.exit(1) 
 
 # ================= 2. 主执行入口 =================
 if __name__ == "__main__":
     output_buffer = io.StringIO()
     try:
-        # 捕获 print 输出
         with contextlib.redirect_stdout(output_buffer):
             run_strategy_logic()
     except Exception as e:
@@ -353,9 +344,8 @@ if __name__ == "__main__":
         traceback.print_exc(file=output_buffer)
 
     final_output = output_buffer.getvalue()
-    print(final_output) # 在控制台打印一遍，方便看 Log
-
-    # 发送推送
+    print(final_output) 
+    
     current_date = datetime.now(pytz.timezone('America/New_York')).strftime('%Y-%m-%d')
     title = f"纳指策略日报 ({current_date})"
     
