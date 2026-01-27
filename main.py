@@ -47,8 +47,8 @@ def html_kv_table(data_dict):
     for k, v in data_dict.items():
         html += f'''
         <tr>
-            <td style="border:1px solid #eee; padding:8px; background-color:#f9f9f9; width:35%; color:#666; font-weight:bold;">{k}</td>
-            <td style="border:1px solid #eee; padding:8px; color:#333;">{v}</td>
+            <td style="border:1px solid #eee; padding:8px; background-color:#f9f9f9; width:40%; color:#666; font-weight:bold; vertical-align: middle;">{k}</td>
+            <td style="border:1px solid #eee; padding:8px; color:#333; vertical-align: middle;">{v}</td>
         </tr>
         '''
     html += '</table>'
@@ -56,18 +56,13 @@ def html_kv_table(data_dict):
 
 def df_to_compact_html(df):
     """紧凑型数据表格 (业绩对比)"""
-    # 🔥 调整 padding 为 3px，确保 6 列数据在手机上也能一行放下
     html = '<table style="width:100%; border-collapse:collapse; font-size:12px; font-family:sans-serif;">'
-    
-    # 表头
     html += '<tr style="background-color:#007bff; color:white;">'
     for col in df.columns:
         html += f'<th style="border:1px solid #ddd; padding:3px; text-align:center; white-space:nowrap;">{col}</th>'
     html += '</tr>'
-    
-    # 内容
     for i, row in df.iterrows():
-        bg = "#f9f9f9" if i % 2 == 0 else "#ffffff" # 隔行变色
+        bg = "#f9f9f9" if i % 2 == 0 else "#ffffff"
         html += f'<tr style="background-color:{bg};">'
         for val in row:
             weight = "bold" if "🔥" in str(val) or "✅" in str(val) else "normal"
@@ -101,7 +96,7 @@ def run_strategy_logic():
     ny_tz = pytz.timezone('America/New_York')
     now_ny = datetime.now(ny_tz)
     
-    # ------------------ 数据获取 (含重试机制) ------------------
+    # ------------------ 数据获取 ------------------
     tickers = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset, vix_asset]
     core_assets = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset]
     
@@ -112,7 +107,7 @@ def run_strategy_logic():
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            print(f"   正在尝试第 {attempt+1}/{max_retries} 次下载...")
+            print(f"   尝试 {attempt+1}/{max_retries}...")
             raw_data = yf.download(tickers, period="max", interval="1d", auto_adjust=False, progress=False)
             
             adj_close = pd.DataFrame()
@@ -122,7 +117,6 @@ def run_strategy_logic():
             else:
                 adj_close = raw_data['Adj Close'] if 'Adj Close' in raw_data else raw_data['Close']
 
-            # 数据有效性检查
             if set(core_assets).issubset(adj_close.columns) and len(adj_close[symbol_1x].dropna()) > 200:
                 data = adj_close[core_assets].ffill().dropna()
                 if vix_asset in adj_close.columns:
@@ -132,14 +126,14 @@ def run_strategy_logic():
                 print("   ✅ 数据校验通过！")
                 break
             else:
-                print("   ⚠️ 数据不完整，等待 5s 后重试...")
+                print("   ⚠️ 数据不完整，等待重试...")
                 time.sleep(5)
         except Exception as e:
-            print(f"   ⚠️ 下载异常: {e}，等待 5s 后重试...")
+            print(f"   ⚠️ 下载异常: {e}")
             time.sleep(5)
 
     if data.empty:
-        print("❌ 严重错误: 重试 3 次后仍无法获取有效数据！")
+        print("❌ 严重错误: 无法获取数据")
         return
 
     # ================= 策略计算 =================
@@ -210,21 +204,36 @@ def run_strategy_logic():
     rsi_now = rsi.iloc[-1]
     vix_now = vix_data.iloc[-1]
 
-    # 0. 顶部时间
+    # 0. 标题与简介
     is_open = "交易中" if (0<=now_ny.weekday()<=4 and 9.5<=now_ny.hour+now_ny.minute/60<=16) else "已收盘"
+    print(f"## 📅 纳指策略日报")
     print(f"<div style='text-align:center; color:#999; font-size:12px; margin-bottom:10px;'>")
     print(f"美东时间: {now_ny.strftime('%Y-%m-%d %H:%M')} | 市场状态: {is_open}")
     print(f"</div>")
 
-    # 1. 市场体检
+    # 🔥 策略简介框
+    print(html_header("💡 策略逻辑"))
+    print(f"""
+    <div style='background-color:#eef6fc; padding:10px; border-radius:4px; font-size:12px; color:#555; border:1px solid #cfe2f3;'>
+    <b>核心逻辑：</b>基于均线(MA{ma_window})判断牛熊，结合 RSI(14) 抄底逃顶，叠加 VIX 恐慌过滤。<br>
+    <b>持仓轮动规则：</b>
+    <ul style='margin:5px 0 0 15px; padding:0;'>
+        <li><b>3x 进攻 ({symbol_3x})：</b>牛市回调 (RSI < {rsi_buy_3x})</li>
+        <li><b>2x 常态 ({symbol_2x})：</b>牛市震荡 ({rsi_buy_3x} < RSI < {rsi_sell_3x})</li>
+        <li><b>1x 防守 ({symbol_1x})：</b>熊市 (破均线) 或 恐慌 (VIX > {int(vix_threshold)})</li>
+    </ul>
+    </div>
+    """)
+
+    # 1. 市场体检 (带条件注释)
     print(html_header("📊 市场体检"))
     
     if price_now < ma_now * (1 - bear_buffer):
-        status_html = "<span style='color:white; background-color:#dc3545; padding:2px 6px; border-radius:4px;'>❌ 熊市</span>"
+        status_html = "<span style='color:white; background-color:#dc3545; padding:2px 6px; border-radius:4px;'>❌ 熊市 (破位)</span>"
     elif price_now < ma_now:
-        status_html = "<span style='color:black; background-color:#ffc107; padding:2px 6px; border-radius:4px;'>⚠️ 震荡</span>"
+        status_html = "<span style='color:black; background-color:#ffc107; padding:2px 6px; border-radius:4px;'>⚠️ 震荡 (均下)</span>"
     else:
-        status_html = "<span style='color:white; background-color:#28a745; padding:2px 6px; border-radius:4px;'>✅ 牛市</span>"
+        status_html = "<span style='color:white; background-color:#28a745; padding:2px 6px; border-radius:4px;'>✅ 牛市 (均上)</span>"
     
     if rsi_now < rsi_buy_3x: rsi_html = f"<b style='color:#007bff'>{rsi_now:.1f} (机会)</b>"
     elif rsi_now > rsi_sell_3x: rsi_html = f"<b style='color:#dc3545'>{rsi_now:.1f} (过热)</b>"
@@ -234,14 +243,15 @@ def run_strategy_logic():
     vix_html = f"<span style='color:{vix_color}'><b>{vix_now:.2f}</b></span>"
 
     health_data = {
-        "趋势状态": status_html,
-        "NDX 价格": f"<b>{price_now:.2f}</b> <span style='color:#999; font-size:11px;'>(MA170: {ma_now:.2f})</span>",
-        "RSI 指标": rsi_html,
-        "VIX 恐慌": vix_html
+        # 键名里嵌入小字体条件说明
+        f"趋势状态 <br><span style='font-size:10px; font-weight:normal; color:#999'>(牛熊分界 MA{ma_window})</span>": status_html,
+        "NDX 价格": f"<b>{price_now:.2f}</b> <span style='color:#999; font-size:11px;'>(MA: {ma_now:.2f})</span>",
+        f"RSI 指标 <br><span style='font-size:10px; font-weight:normal; color:#999'>(买<{rsi_buy_3x} / 卖>{rsi_sell_3x})</span>": rsi_html,
+        f"VIX 恐慌 <br><span style='font-size:10px; font-weight:normal; color:#999'>(熔断 > {int(vix_threshold)})</span>": vix_html
     }
     print(html_kv_table(health_data))
 
-    # 2. 历史业绩 PK (🔥 已加回 SPY)
+    # 2. 业绩对比
     print(html_header("🏆 业绩对比"))
     periods = {
         '1周':7, '1月':30, '3月':90, 
@@ -264,7 +274,7 @@ def run_strategy_logic():
             "QQQ": f"{b1*100:.1f}%",
             "QLD": f"{b2*100:.1f}%",
             "TQQQ": f"{b3*100:.1f}%",
-            "SPY": f"{spy*100:.1f}%"  # ✅ 已恢复 SPY
+            "SPY": f"{spy*100:.1f}%"
         })
     print(df_to_compact_html(pd.DataFrame(perf_data)))
 
@@ -289,7 +299,7 @@ def run_strategy_logic():
     else:
         print("<div style='color:#999; text-align:center; padding:10px;'>近期无调仓</div>")
 
-    # 4. 年度战报
+    # 4. 年度数据
     print(html_header("📅 年度数据"))
     df_perf = pd.DataFrame({'策略':strat_daily_ret, 'QQQ':ret_1x, 'QLD':ret_2x, 'TQQQ':ret_3x})
     years = sorted(df_perf.index.year.unique(), reverse=True)
