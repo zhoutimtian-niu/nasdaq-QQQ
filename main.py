@@ -19,14 +19,14 @@ def send_pushplus(title, content):
         return
 
     url = 'http://www.pushplus.plus/send'
-    # HTML 模板不需要处理换行符，但为了保险
-    content = content.replace('\n', '\n') 
+    # HTML 模板不需要处理换行符
+    content = content.replace('\n', '') 
     
     data = {
         "token": token,
         "title": title,
         "content": content,
-        "template": "html"  # 🔥 必须用 html 模板才能渲染表格
+        "template": "html"  # 🔥 全程使用 HTML 渲染
     }
     
     try:
@@ -38,24 +38,38 @@ def send_pushplus(title, content):
     except Exception as e:
         print(f"❌ 推送请求出错: {e}")
 
-# ================= 1. 紧凑型 HTML 表格生成器 =================
+# ================= 1. HTML 美化组件 =================
+def html_header(text):
+    return f"<h3 style='margin-top:15px; border-left:4px solid #007bff; padding-left:8px; color:#333;'>{text}</h3>"
+
+def html_kv_table(data_dict):
+    """生成双列 Key-Value 表格 (用于市场体检)"""
+    html = '<table style="width:100%; border-collapse:collapse; font-size:13px; font-family:sans-serif; margin-bottom:10px;">'
+    for k, v in data_dict.items():
+        html += f'''
+        <tr>
+            <td style="border:1px solid #eee; padding:8px; background-color:#f9f9f9; width:35%; color:#666; font-weight:bold;">{k}</td>
+            <td style="border:1px solid #eee; padding:8px; color:#333;">{v}</td>
+        </tr>
+        '''
+    html += '</table>'
+    return html
+
 def df_to_compact_html(df):
-    # 针对手机屏幕优化的 CSS：字号 12px，内边距 3px
+    """生成紧凑型数据表格 (用于业绩对比)"""
     html = '<table style="width:100%; border-collapse:collapse; font-size:12px; font-family:sans-serif;">'
-    
     # 表头
-    html += '<tr style="background-color:#f2f2f2;">'
+    html += '<tr style="background-color:#007bff; color:white;">'
     for col in df.columns:
-        html += f'<th style="border:1px solid #ddd; padding:3px; text-align:center; white-space:nowrap;">{col}</th>'
+        html += f'<th style="border:1px solid #ddd; padding:5px; text-align:center; white-space:nowrap;">{col}</th>'
     html += '</tr>'
-    
     # 内容
-    for _, row in df.iterrows():
-        html += '<tr>'
+    for i, row in df.iterrows():
+        bg = "#f9f9f9" if i % 2 == 0 else "#ffffff" # 隔行变色
+        html += f'<tr style="background-color:{bg};">'
         for val in row:
-            # 自动判断是否需要加粗（比如含 🔥 标记的）
             weight = "bold" if "🔥" in str(val) or "✅" in str(val) else "normal"
-            html += f'<td style="border:1px solid #ddd; padding:3px; text-align:center; font-weight:{weight};">{val}</td>'
+            html += f'<td style="border:1px solid #ddd; padding:5px; text-align:center; font-weight:{weight};">{val}</td>'
         html += '</tr>'
     html += '</table>'
     return html
@@ -81,13 +95,12 @@ def run_strategy_logic():
     transaction_cost = 0.001 
 
     etf_map = {1: symbol_1x, 2: symbol_2x, 3: symbol_3x}
-    name_map = {1: f'{symbol_1x} (1x 防守)', 2: f'{symbol_2x} (2x 常态)', 3: f'{symbol_3x} (3x 进攻)'}
-
+    
     # ------------------ 市场状态 ------------------
     ny_tz = pytz.timezone('America/New_York')
     now_ny = datetime.now(ny_tz)
     
-    # ------------------ 数据获取 (带重试) ------------------
+    # ------------------ 数据获取 (含重试机制) ------------------
     tickers = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset, vix_asset]
     core_assets = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset]
     
@@ -98,9 +111,9 @@ def run_strategy_logic():
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            print(f"   正在尝试第 {attempt+1}/{max_retries} 次下载...")
             raw_data = yf.download(tickers, period="max", interval="1d", auto_adjust=False, progress=False)
             
-            # 兼容性处理
             adj_close = pd.DataFrame()
             if isinstance(raw_data.columns, pd.MultiIndex):
                 try: adj_close = raw_data['Adj Close']
@@ -108,23 +121,25 @@ def run_strategy_logic():
             else:
                 adj_close = raw_data['Adj Close'] if 'Adj Close' in raw_data else raw_data['Close']
 
-            # 检查完整性
+            # 🔥 数据有效性检查：必须包含核心资产且长度足够
             if set(core_assets).issubset(adj_close.columns) and len(adj_close[symbol_1x].dropna()) > 200:
                 data = adj_close[core_assets].ffill().dropna()
+                # VIX 容错处理
                 if vix_asset in adj_close.columns:
                     vix_data = adj_close[vix_asset].reindex(data.index).ffill().fillna(0)
                 else:
                     vix_data = pd.Series(0, index=data.index)
+                print("   ✅ 数据校验通过！")
                 break
             else:
-                print(f"⚠️ 尝试 {attempt+1} 失败，重试中...")
+                print("   ⚠️ 数据不完整，等待 5s 后重试...")
                 time.sleep(5)
         except Exception as e:
-            print(f"⚠️ 下载异常: {e}")
+            print(f"   ⚠️ 下载异常: {e}，等待 5s 后重试...")
             time.sleep(5)
 
     if data.empty:
-        print("❌ 严重错误: 无法获取数据")
+        print("❌ 严重错误: 重试 3 次后仍无法获取有效数据！")
         return
 
     # ================= 策略计算 =================
@@ -189,37 +204,51 @@ def run_strategy_logic():
         if idx >= len(cum): idx = len(cum) - 1
         return (cum.iloc[-1] / cum.iloc[idx]) - 1
 
-    # ================= 输出看板 (全量信息版) =================
+    # ================= 输出看板 (全 HTML 美化版) =================
     price_now = data[indicator_asset].iloc[-1]
     ma_now = sma.iloc[-1]
     rsi_now = rsi.iloc[-1]
     vix_now = vix_data.iloc[-1]
 
-    # 1. 标题与时间
+    # 0. 顶部时间栏
     is_open = "交易中" if (0<=now_ny.weekday()<=4 and 9.5<=now_ny.hour+now_ny.minute/60<=16) else "已收盘"
-    print(f"## 📅 纳指策略日报")
-    print(f"<div style='font-size:12px; color:#666;'>时间: {now_ny.strftime('%Y-%m-%d %H:%M')} (美东) | 状态: {is_open}</div>")
+    print(f"<div style='text-align:center; color:#999; font-size:12px; margin-bottom:10px;'>")
+    print(f"美东时间: {now_ny.strftime('%Y-%m-%d %H:%M')} | 市场状态: {is_open}")
+    print(f"</div>")
 
-    # 2. 市场体检 (恢复详细数据)
-    print(f"\n### 📊 市场体检")
+    # 1. 市场体检 (改为漂亮的 KV 表格)
+    print(html_header("📊 市场体检"))
     
-    status_text = "✅ 牛市"
-    if price_now < ma_now * (1 - bear_buffer): status_text = "❌ 熊市 (破位)"
-    elif price_now < ma_now: status_text = "⚠️ 震荡 (均下)"
+    # 状态判定
+    if price_now < ma_now * (1 - bear_buffer):
+        status_html = "<span style='color:white; background-color:#dc3545; padding:2px 6px; border-radius:4px;'>❌ 熊市 (破位)</span>"
+    elif price_now < ma_now:
+        status_html = "<span style='color:black; background-color:#ffc107; padding:2px 6px; border-radius:4px;'>⚠️ 震荡 (均下)</span>"
+    else:
+        status_html = "<span style='color:white; background-color:#28a745; padding:2px 6px; border-radius:4px;'>✅ 牛市 (均上)</span>"
     
-    rsi_color = "black"
-    if rsi_now < rsi_buy_3x: rsi_color = "blue"
-    elif rsi_now > rsi_sell_3x: rsi_color = "red"
-    
-    vix_icon = "🟢" if vix_now < 30 else "🔴" if vix_now > vix_threshold else "🟡"
-    
-    print(f"**趋势状态**: {status_text}")
-    print(f"- **NDX价格**: `{price_now:.2f}` (MA{ma_window}: `{ma_now:.2f}`)")
-    print(f"- **RSI指标**: <span style='color:{rsi_color};'>`{rsi_now:.2f}`</span> (机会<{rsi_buy_3x} / 过热>{rsi_sell_3x})")
-    print(f"- **VIX恐慌**: `{vix_now:.2f}` {vix_icon} (熔断: {vix_threshold})")
+    # RSI 判定
+    if rsi_now < rsi_buy_3x:
+        rsi_html = f"<b style='color:#007bff'>{rsi_now:.1f} (机会)</b>"
+    elif rsi_now > rsi_sell_3x:
+        rsi_html = f"<b style='color:#dc3545'>{rsi_now:.1f} (过热)</b>"
+    else:
+        rsi_html = f"{rsi_now:.1f} (中性)"
 
-    # 3. 历史业绩 PK (恢复 SPY 和 QLD 列)
-    print(f"\n### 🏆 业绩对比")
+    # VIX 判定
+    vix_color = "#28a745" if vix_now < 30 else "#dc3545"
+    vix_html = f"<span style='color:{vix_color}'><b>{vix_now:.2f}</b></span>"
+
+    health_data = {
+        "趋势状态": status_html,
+        "NDX 价格": f"<b>{price_now:.2f}</b> <span style='color:#999; font-size:11px;'>(MA170: {ma_now:.2f})</span>",
+        "RSI 指标": rsi_html,
+        "VIX 恐慌": vix_html
+    }
+    print(html_kv_table(health_data))
+
+    # 2. 历史业绩 PK
+    print(html_header("🏆 业绩对比"))
     periods = {
         '1周':7, '1月':30, '3月':90, 
         '半年':180, '1年':365, '3年':1095, '10年':3650
@@ -233,26 +262,27 @@ def run_strategy_logic():
         b3 = get_period_ret(bench_cum_3x, days)
         spy = get_period_ret(bench_cum_spx, days)
         
-        icon = "🔥" if s > b2 else "" # 跑赢2倍算厉害
+        icon = "🔥" if s > b2 else "" 
         
         perf_data.append({
             "区间": label,
             "策略": f"{s*100:.1f}%{icon}",
             "QQQ": f"{b1*100:.1f}%",
-            "QLD": f"{b2*100:.1f}%", # 恢复
+            "QLD": f"{b2*100:.1f}%",
             "TQQQ": f"{b3*100:.1f}%",
-            "SPY": f"{spy*100:.1f}%"  # 恢复
+            # "SPY": f"{spy*100:.1f}%" # 手机上列太多会挤，SPY可省略，看个人喜好
         })
     print(df_to_compact_html(pd.DataFrame(perf_data)))
 
-    # 4. 调仓记录
+    # 3. 调仓记录
+    print(html_header("📝 调仓记录"))
     switch_history = []
     temp_signal = signals[-1]
     end_idx = len(signals) - 1
     for i in range(len(signals)-2, -1, -1):
         if signals[i] != temp_signal:
             switch_history.append({
-                "日期": data.index[i+1].strftime('%Y-%m-%d'),
+                "日期": data.index[i+1].strftime('%m-%d'),
                 "操作": f"{etf_map[signals[i]]} -> {etf_map[temp_signal]}",
                 "持有": f"{end_idx - i}天"
             })
@@ -260,20 +290,19 @@ def run_strategy_logic():
             end_idx = i
         if len(switch_history) >= 5: break
     
-    print(f"\n### 📝 最近调仓")
     if switch_history:
         print(df_to_compact_html(pd.DataFrame(switch_history)))
     else:
-        print("无近期调仓记录")
+        print("<div style='color:#999; text-align:center; padding:10px;'>近期无调仓</div>")
 
-    # 5. 年度战报 (保留所有列)
-    print(f"\n### 📅 年度详细数据")
+    # 4. 年度战报
+    print(html_header("📅 年度数据"))
     df_perf = pd.DataFrame({'策略':strat_daily_ret, 'QQQ':ret_1x, 'QLD':ret_2x, 'TQQQ':ret_3x})
     years = sorted(df_perf.index.year.unique(), reverse=True)
     
     year_data = []
     for y in years:
-        if y < datetime.now().year - 10: break # 只展示10年
+        if y < datetime.now().year - 10: break 
         sub = df_perf[df_perf.index.year == y]
         ys = (1+sub['策略']).prod()-1
         yq = (1+sub['QQQ']).prod()-1
@@ -293,7 +322,7 @@ def run_strategy_logic():
         })
     print(df_to_compact_html(pd.DataFrame(year_data)))
 
-    # 6. 今日行动 (计算持仓天数)
+    # 5. 今日行动
     last = signals[-1]
     prev = signals[-2]
     
@@ -304,18 +333,19 @@ def run_strategy_logic():
         else: break
     held_days += 1
     
-    color = "#e74c3c" if last != prev else "#2ecc71"
-    action_text = "调仓交易 (ACTION)" if last != prev else "锁仓持有 (HOLD)"
+    color = "#dc3545" if last != prev else "#28a745" # 红变动，绿锁仓
+    action_text = "⚠️ 调仓交易 (ACTION)" if last != prev else "🔒 锁仓持有 (HOLD)"
+    bg_color = "#fff5f5" if last != prev else "#f0fff4"
     
-    print(f"\n<div style='background-color:#f9f9f9; padding:15px; border-left: 6px solid {color}; margin-top:15px; border-radius:4px; box-shadow: 2px 2px 5px #ddd;'>")
-    print(f"<div style='font-size:16px; font-weight:bold; color:{color};'>{action_text}</div>")
-    print(f"<div>昨日持有: {etf_map[prev]}</div>")
-    print(f"<div>今日目标: <b>{etf_map[last]}</b></div>")
-    print(f"<div style='font-size:12px; color:#666; margin-top:5px;'>已连续持仓: {held_days} 个交易日</div>")
+    print(f"\n<div style='background-color:{bg_color}; padding:15px; border-left: 6px solid {color}; margin-top:20px; border-radius:4px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);'>")
+    print(f"<div style='font-size:18px; font-weight:bold; color:{color}; margin-bottom:8px;'>{action_text}</div>")
+    print(f"<div style='margin-bottom:4px;'>昨日持有: <span style='color:#666;'>{etf_map[prev]}</span></div>")
+    print(f"<div style='margin-bottom:4px;'>今日目标: <b style='color:#000; font-size:16px;'>{etf_map[last]}</b></div>")
+    print(f"<div style='font-size:12px; color:#999; margin-top:8px;'>已连续持仓: {held_days} 个交易日</div>")
     print("</div>")
     
     if last != prev:
-        print(f"\n❗ **请卖出 {etf_map[prev]}，全仓买入 {etf_map[last]}**")
+        print(f"\n<div style='text-align:center; margin-top:10px; font-weight:bold; color:red;'>❗ 请立即卖出 {etf_map[prev]}，全仓买入 {etf_map[last]}</div>")
 
 # ================= 3. 主程序 =================
 if __name__ == "__main__":
@@ -324,11 +354,14 @@ if __name__ == "__main__":
         with contextlib.redirect_stdout(output_buffer):
             run_strategy_logic()
     except Exception as e:
-        output_buffer.write(f"\n❌ 错误: {str(e)}\n")
+        output_buffer.write(f"<br><br>❌ 程序执行出错: {str(e)}<br>")
         traceback.print_exc(file=output_buffer)
 
     final_output = output_buffer.getvalue()
-    print(final_output) 
     
+    # 控制台打印一份纯文本概要 (方便Github Log查看)
+    print("--- 脚本执行完毕，HTML 内容已生成 ---")
+    
+    # 发送推送
     current_date = datetime.now(pytz.timezone('America/New_York')).strftime('%Y-%m-%d')
     send_pushplus(f"纳指策略 ({current_date})", final_output)
