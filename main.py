@@ -74,6 +74,7 @@ def df_to_compact_html(df):
 # ================= 2. 策略逻辑封装 =================
 def run_strategy_logic():
     # ------------------ 配置参数 ------------------
+    # 🔥 这里的配置已严格还原为你最初的逻辑
     symbol_1x = 'QQQ'   
     symbol_2x = 'QLD'   
     symbol_3x = 'TQQQ'
@@ -96,7 +97,7 @@ def run_strategy_logic():
     ny_tz = pytz.timezone('America/New_York')
     now_ny = datetime.now(ny_tz)
     
-    # ------------------ 数据获取 ------------------
+    # ------------------ 数据获取 (含重试机制) ------------------
     tickers = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset, vix_asset]
     core_assets = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset]
     
@@ -117,6 +118,7 @@ def run_strategy_logic():
             else:
                 adj_close = raw_data['Adj Close'] if 'Adj Close' in raw_data else raw_data['Close']
 
+            # 数据校验：确保核心列都在，且长度足够
             if set(core_assets).issubset(adj_close.columns) and len(adj_close[symbol_1x].dropna()) > 200:
                 data = adj_close[core_assets].ffill().dropna()
                 if vix_asset in adj_close.columns:
@@ -211,7 +213,7 @@ def run_strategy_logic():
     print(f"美东时间: {now_ny.strftime('%Y-%m-%d %H:%M')} | 市场状态: {is_open}")
     print(f"</div>")
 
-    # 🔥 策略简介框
+    # 🔥 策略简介框 (这里会自动显示 symbol_1x 即 QQQ)
     print(html_header("💡 策略逻辑"))
     print(f"""
     <div style='background-color:#eef6fc; padding:10px; border-radius:4px; font-size:12px; color:#555; border:1px solid #cfe2f3;'>
@@ -225,7 +227,7 @@ def run_strategy_logic():
     </div>
     """)
 
-    # 1. 市场体检 (带条件注释)
+    # 1. 市场体检
     print(html_header("📊 市场体检"))
     
     if price_now < ma_now * (1 - bear_buffer):
@@ -243,7 +245,6 @@ def run_strategy_logic():
     vix_html = f"<span style='color:{vix_color}'><b>{vix_now:.2f}</b></span>"
 
     health_data = {
-        # 键名里嵌入小字体条件说明
         f"趋势状态 <br><span style='font-size:10px; font-weight:normal; color:#999'>(牛熊分界 MA{ma_window})</span>": status_html,
         "NDX 价格": f"<b>{price_now:.2f}</b> <span style='color:#999; font-size:11px;'>(MA: {ma_now:.2f})</span>",
         f"RSI 指标 <br><span style='font-size:10px; font-weight:normal; color:#999'>(买<{rsi_buy_3x} / 卖>{rsi_sell_3x})</span>": rsi_html,
