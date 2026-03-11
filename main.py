@@ -138,6 +138,17 @@ def run_strategy_logic():
         print("❌ 严重错误: 无法获取数据")
         return
 
+    
+    # ========================================================
+    # 🔥 【新增修复：剔除盘前/盘中的未收盘脏数据】 🔥
+    last_data_date = data.index[-1].date()
+    # 如果最后一行是今天，并且美东时间还没到 16:00 (下午4点收盘)
+    if last_data_date == now_ny.date() and now_ny.hour < 16:
+        print("   🧹 检测到未收盘的当日盘前数据，已自动剔除，防闪烁！")
+        data = data.iloc[:-1]
+        vix_data = vix_data.iloc[:-1]
+    # ========================================================
+
     # ================= 策略计算 =================
     sma = data[indicator_asset].rolling(window=ma_window).mean()
     delta = data[indicator_asset].diff()
