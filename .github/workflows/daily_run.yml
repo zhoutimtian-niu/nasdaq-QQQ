@@ -4,7 +4,7 @@ on:
   schedule:
     # 北京时间每天早上 20:30 (冬令时) 运行
     # 对应 UTC 时间 12:30
-    - cron: '30 12 * * 1-5'
+    - cron: '03,25 12 * * 1-5'
   workflow_dispatch:
 
 jobs:
