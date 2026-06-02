@@ -1,0 +1,25 @@
+# 自动保活：防止GitHub Actions因60天无活动被禁用
+name: 仓库自动保活
+on:
+  schedule:
+    - cron: '0 0 */50 * *'  # 每50天自动运行一次（绝对安全）
+  workflow_dispatch:  # 允许手动点击运行
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 赋予提交推送权限（必须）
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 生成自动提交
+        run: |
+          date > .keepalive
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git add .keepalive
+          git commit -m "🤖 自动保活：维持仓库活跃" || exit 0
+
+      - name: 推送到仓库
+        uses: ad-m/github-push-action@master
