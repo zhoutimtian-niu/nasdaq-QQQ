@@ -256,6 +256,19 @@ class PushTests(unittest.TestCase):
         with self.assertRaises(DeliveryUnknown):
             self.send()
 
+    def test_missing_business_code_is_unknown_and_never_reposted(self):
+        self.session.post.return_value = response(body={"data": "test-short-code"})
+        for _ in range(2):
+            with self.assertRaises(DeliveryUnknown):
+                self.send()
+        self.assertEqual(self.session.post.call_count, 1)
+
+    def test_unrecognized_ledger_status_blocks_post(self):
+        FileState(self.path).save({"version": 1, "entries": {"key": {"status": "unrecognized"}}})
+        with self.assertRaises(StateError):
+            self.send()
+        self.session.post.assert_not_called()
+
     def test_expired_message_is_not_sent(self):
         self.expiry = datetime.now(timezone.utc) - timedelta(seconds=1)
         with self.assertRaises(PushError):
