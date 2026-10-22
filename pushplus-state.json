@@ -1,4 +1,8 @@
 {
   "version": 1,
-  "entries": {}
+  "entries": {
+    "storage-self-check-6379559e5588458e967920ea296b8d81": {
+      "status": "self_test"
+    }
+  }
 }
