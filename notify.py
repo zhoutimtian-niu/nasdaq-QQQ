@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 
 import requests
 
+from notification_state import StateError
+
 LOG = logging.getLogger(__name__)
 
 
@@ -61,6 +63,9 @@ class PushPlus:
         with store:
             state = store.load()
             entry = state["entries"].get(key)
+            known_statuses = {"preparing", "unknown", "accepted", "accepted_unverified", "accepted_pending", "delivered", "failed"}
+            if key in state["entries"] and (not isinstance(entry, dict) or entry.get("status") not in known_statuses):
+                raise StateError("发送记录状态无效，停止自动发送并等待核对")
             if entry and entry["status"] == "delivered":
                 return Receipt("delivered", duplicate=True)
             if entry and entry["status"] in ("accepted", "accepted_unverified", "accepted_pending"):
@@ -101,6 +106,8 @@ class PushPlus:
                 code = body.get("code")
             except (ValueError, AttributeError):
                 fail("unknown", "PushPlus响应不是有效业务JSON，结果未知")
+            if not isinstance(code, int) or isinstance(code, bool):
+                fail("unknown", "PushPlus业务状态码缺失或无效，结果未知；停止自动重发")
             if code != 200:
                 safe_code = code if isinstance(code, int) else "invalid"
                 fail("failed", f"PushPlus业务拒绝 code={safe_code}，未发送成功")
