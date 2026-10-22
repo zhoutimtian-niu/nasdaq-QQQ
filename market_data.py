@@ -102,4 +102,3 @@ def load_market_data(signal_date, downloader=download_symbol, calendar=None):
     market = validate_frames(frames, signal_date, calendar)
     LOG.info("行情通过校验 signal_date=%s sessions=%d assets=%d", signal_date, len(market.close), len(SYMBOLS))
     return market
-

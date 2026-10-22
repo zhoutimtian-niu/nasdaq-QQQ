@@ -58,4 +58,3 @@ def calculate_signals(close, p=PARAMETERS):
         state = next_state(state, x, m, r, v, p)
         states.append(state)
     return pd.DataFrame({"signal": states, "ma": ma, "rsi": rsi}, index=close.index)
-

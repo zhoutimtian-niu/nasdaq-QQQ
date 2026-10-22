@@ -52,4 +52,3 @@ def session_plan(now=None, calendar=None, preview=False):
 def expected_sessions(start, end, calendar=None):
     cal = calendar if calendar is not None else calendar_for(datetime.now(timezone.utc))
     return cal.sessions_in_range(pd.Timestamp(start), pd.Timestamp(end)).tz_localize(None)
-
