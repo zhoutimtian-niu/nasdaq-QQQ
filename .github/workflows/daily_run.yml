@@ -2,29 +2,77 @@ name: Nasdaq Strategy Daily Run
 
 on:
   schedule:
-    # 北京时间每天早上 20:30 (冬令时) 运行
-    # 对应 UTC 时间 12:30
-    - cron: '03,25 11 * * 1-5'
+    # 北京时间周一至周五 19:03、19:25；19:47为有限补跑。
+    # UTC固定，不随美国夏令时改变。GitHub schedule仍可能延迟。
+    - cron: '03,25,47 11 * * 1-5'
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只生成报告并校验，不发微信、不写远程发送状态（默认开启）'
+        required: true
+        default: true
+        type: boolean
+      check_state:
+        description: '额外验证远程去重存储（仅写入/读回/清除测试标记，不发微信）'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nasdaq-daily-notification
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      # Dedicated notification-state branch; no token is ever written to that branch.
+      contents: write
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
-          python-version: '3.10'
+          python-version: '3.12'
+          cache: pip
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Verify original signals and failure handling
+        run: python -m unittest discover -s tests -v
+
+      - name: Explicit persistent state self-check (no message)
+        if: github.event_name == 'workflow_dispatch' && inputs.check_state
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python check_state.py
 
       - name: Run Strategy
         env:
           PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+          PUSHPLUS_ACCESS_KEY: ${{ secrets.PUSHPLUS_ACCESS_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: python main.py
+
+      - name: Preserve report and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: strategy-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            output/report.html
+            output/run.json
+            output/run.log
+            output/signals.csv
+            output/daily_returns.csv
+          if-no-files-found: warn
+          retention-days: 14

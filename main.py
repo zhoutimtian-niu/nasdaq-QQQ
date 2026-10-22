@@ -1,379 +1,120 @@
+"""Generate a validated daily report; --dry-run never sends or writes remote state."""
+import argparse
+import hashlib
+import json
+import logging
 import os
-import io
-import sys
-import contextlib
-import requests
-import yfinance as yf
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-import pytz
-import traceback
-import time
+from datetime import datetime, timezone
+from pathlib import Path
 
-# ================= 0. 推送配置函数 =================
-def send_pushplus(title, content):
-    token = os.environ.get('PUSH_TOKEN')
-    if not token:
-        print("⚠️ 未检测到 PUSH_TOKEN，跳过推送。")
-        return
+from backtest import backtest_returns
+from market_calendar import OutsideExecutionWindow, session_plan
+from market_data import DataError, load_market_data
+from notification_state import StateError, state_store
+from notify import PushError, PushPlus
+from report import build_report, data_failure_report
+from strategy import MODEL_VERSION, calculate_signals
 
-    url = 'http://www.pushplus.plus/send'
-    content = content.replace('\n', '') 
-    
-    data = {
-        "token": token,
-        "title": title,
-        "content": content,
-        "template": "html"
-    }
-    
+LOG = logging.getLogger(__name__)
+
+
+def truthy(value):
+    return str(value).lower() in ("true", "1", "yes")
+
+
+def save_summary(output, values):
+    (output / "run.json").write_text(json.dumps(values, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with open(summary_path, "a", encoding="utf-8") as f:
+            f.write("## 纳指日报执行结果\n\n")
+            for key, value in values.items():
+                f.write(f"- {key}: {value}\n")
+
+
+def publish_report(plan, title, content, output, category="daily"):
+    client = PushPlus(os.environ.get("PUSH_TOKEN"), os.environ.get("PUSHPLUS_ACCESS_KEY"))
+    raw_key = f"{MODEL_VERSION}|{plan.signal_date}|{plan.execution_date}|wechat|{category}"
+    key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    return client.publish(key, title, content, plan.market_close, state_store(output))
+
+
+def run(dry_run=False, output_dir="output", now=None, loader=load_market_data, planner=session_plan, publisher=publish_report):
+    now = now or datetime.now(timezone.utc)
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    status = {"model_version": MODEL_VERSION, "dry_run": dry_run, "generated_at_utc": now.isoformat()}
     try:
-        response = requests.post(url, json=data)
-        if response.status_code == 200:
-            print("✅ 推送发送成功！")
-        else:
-            print(f"❌ 推送发送失败: {response.text}")
-    except Exception as e:
-        print(f"❌ 推送请求出错: {e}")
-
-# ================= 1. HTML 美化组件 =================
-def html_header(text):
-    return f"<h3 style='margin-top:15px; border-left:4px solid #007bff; padding-left:8px; color:#333;'>{text}</h3>"
-
-def html_kv_table(data_dict):
-    """双列 Key-Value 表格 (市场体检)"""
-    html = '<table style="width:100%; border-collapse:collapse; font-size:13px; font-family:sans-serif; margin-bottom:10px;">'
-    for k, v in data_dict.items():
-        html += f'''
-        <tr>
-            <td style="border:1px solid #eee; padding:8px; background-color:#f9f9f9; width:40%; color:#666; font-weight:bold; vertical-align: middle;">{k}</td>
-            <td style="border:1px solid #eee; padding:8px; color:#333; vertical-align: middle;">{v}</td>
-        </tr>
-        '''
-    html += '</table>'
-    return html
-
-def df_to_compact_html(df):
-    """紧凑型数据表格 (业绩对比)"""
-    html = '<table style="width:100%; border-collapse:collapse; font-size:12px; font-family:sans-serif;">'
-    html += '<tr style="background-color:#007bff; color:white;">'
-    for col in df.columns:
-        html += f'<th style="border:1px solid #ddd; padding:3px; text-align:center; white-space:nowrap;">{col}</th>'
-    html += '</tr>'
-    for i, row in df.iterrows():
-        bg = "#f9f9f9" if i % 2 == 0 else "#ffffff"
-        html += f'<tr style="background-color:{bg};">'
-        for val in row:
-            weight = "bold" if "🔥" in str(val) or "✅" in str(val) else "normal"
-            html += f'<td style="border:1px solid #ddd; padding:3px; text-align:center; font-weight:{weight};">{val}</td>'
-        html += '</tr>'
-    html += '</table>'
-    return html
-
-# ================= 2. 策略逻辑封装 =================
-def run_strategy_logic():
-    # ------------------ 配置参数 ------------------
-    # 🔥 这里的配置已严格还原为你最初的逻辑
-    symbol_1x = 'QQQ'   
-    symbol_2x = 'QLD'   
-    symbol_3x = 'TQQQ'
-    symbol_spx = 'SPY'
-    indicator_asset = '^NDX' 
-    vix_asset = '^VIX'       
-
-    ma_window = 170      
-    rsi_window = 14
-    rsi_buy_3x = 65      
-    rsi_sell_3x = 80     
-    bear_buffer = 0.01   
-    bull_buffer = 0.0    
-    vix_threshold = 40.0 
-    transaction_cost = 0.001 
-
-    etf_map = {1: symbol_1x, 2: symbol_2x, 3: symbol_3x}
-    
-    # ------------------ 市场状态 ------------------
-    ny_tz = pytz.timezone('America/New_York')
-    now_ny = datetime.now(ny_tz)
-    
-    # ------------------ 数据获取 (含重试机制) ------------------
-    tickers = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset, vix_asset]
-    core_assets = [symbol_1x, symbol_2x, symbol_3x, symbol_spx, indicator_asset]
-    
-    data = pd.DataFrame()
-    vix_data = pd.Series()
-    
-    print("⏳ 开始下载数据...")
-    max_retries = 3
-    for attempt in range(max_retries):
+        plan = planner(now, preview=dry_run)
+        if plan is None:
+            status.update(status="skipped_non_trading_day", notification="not_sent")
+            save_summary(output, status)
+            LOG.info("美股非交易日，不生成买卖指令或发送日报")
+            return 0
+        status.update(signal_date=str(plan.signal_date), execution_date=str(plan.execution_date), generated_after_open=plan.late)
         try:
-            print(f"   尝试 {attempt+1}/{max_retries}...")
-            raw_data = yf.download(tickers, period="max", interval="1d", auto_adjust=False, progress=False)
-            
-            adj_close = pd.DataFrame()
-            if isinstance(raw_data.columns, pd.MultiIndex):
-                try: adj_close = raw_data['Adj Close']
-                except KeyError: adj_close = raw_data['Close']
-            else:
-                adj_close = raw_data['Adj Close'] if 'Adj Close' in raw_data else raw_data['Close']
-
-            # 数据校验：确保核心列都在，且长度足够
-            if set(core_assets).issubset(adj_close.columns) and len(adj_close[symbol_1x].dropna()) > 200:
-                data = adj_close[core_assets].ffill().dropna()
-                if vix_asset in adj_close.columns:
-                    vix_data = adj_close[vix_asset].reindex(data.index).ffill().fillna(0)
-                else:
-                    vix_data = pd.Series(0, index=data.index)
-                print("   ✅ 数据校验通过！")
-                break
-            else:
-                print("   ⚠️ 数据不完整，等待重试...")
-                time.sleep(5)
-        except Exception as e:
-            print(f"   ⚠️ 下载异常: {e}")
-            time.sleep(5)
-
-    if data.empty:
-        print("❌ 严重错误: 无法获取数据")
-        return
-
-    
-    # ========================================================
-    # 🔥 【新增修复：剔除盘前/盘中的未收盘脏数据】 🔥
-    last_data_date = data.index[-1].date()
-    # 如果最后一行是今天，并且美东时间还没到 16:00 (下午4点收盘)
-    if last_data_date == now_ny.date() and now_ny.hour < 16:
-        print("   🧹 检测到未收盘的当日盘前数据，已自动剔除，防闪烁！")
-        data = data.iloc[:-1]
-        vix_data = vix_data.iloc[:-1]
-    # ========================================================
-
-    # ================= 策略计算 =================
-    sma = data[indicator_asset].rolling(window=ma_window).mean()
-    delta = data[indicator_asset].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_window).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_window).mean().replace(0, 1e-10)
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-
-    signals = [] 
-    current_state = 2 
-
-    for i in range(len(data)):
-        price = data[indicator_asset].iloc[i]
-        ma = sma.iloc[i]
-        r = rsi.iloc[i]
-        vix = vix_data.iloc[i]
-        
-        if pd.isna(ma): 
-            signals.append(2)
-            continue
-
-        if vix > vix_threshold:
-            current_state = 1 
-        elif price < ma * (1 - bear_buffer):
-            current_state = 1 
+            market = loader(plan.signal_date)
+        except DataError:
+            title, content = data_failure_report(plan)
+            (output / "report.html").write_text(content, encoding="utf-8")
+            if not dry_run:
+                try:
+                    receipt = publisher(plan, title, content, output, category="data-health")
+                    status["failure_notice"] = receipt.status
+                except (PushError, StateError) as exc:
+                    LOG.error("数据异常通知未完成 type=%s", type(exc).__name__)
+            raise
+        # Double-check loader contracts before rendering a trading instruction.
+        if market.close.empty or market.close.index[-1].date() != plan.signal_date:
+            raise DataError("行情日期与预期信号交易日不一致")
+        signals = calculate_signals(market.close)
+        if signals.iloc[-1][["ma", "rsi"]].isna().any():
+            raise DataError("指标尚未完成预热，停止发布交易目标")
+        signals.to_csv(output / "signals.csv", encoding="utf-8-sig")
+        performance = None
+        try:
+            performance = backtest_returns(market, signals)
+            performance.to_csv(output / "daily_returns.csv", encoding="utf-8-sig")
+        except Exception as exc:
+            # A display-only backtest failure must not suppress a valid daily target.
+            status["performance"] = "unavailable"
+            LOG.error("回测模块不可用 type=%s，保留经验证的当日模型信号", type(exc).__name__)
+        title, content = build_report(market, signals, plan, now, performance)
+        (output / "report.html").write_text(content, encoding="utf-8")
+        status.update(target={1: "QQQ", 2: "QLD", 3: "TQQQ"}[int(signals["signal"].iloc[-1])], sessions=len(market.close))
+        if dry_run:
+            status.update(status="dry_run_validated", notification="not_sent")
+            LOG.info("DRY RUN: 报告已生成；未读取推送Token、未发微信、未写远程发送状态")
         else:
-            if current_state == 1:
-                if price > ma * (1 + bull_buffer):
-                    current_state = 2
-            else:
-                if r > rsi_sell_3x:
-                    current_state = 2 
-                elif r < rsi_buy_3x:
-                    current_state = 3 
-        signals.append(current_state)
+            receipt = publisher(plan, title, content, output)
+            status.update(status="completed", notification=receipt.status, duplicate_suppressed=receipt.duplicate)
+            if receipt.status != "delivered":
+                LOG.warning("日报已受理或去重；最终投递尚未确认。查询需要PUSHPLUS_ACCESS_KEY")
+        save_summary(output, status)
+        return 0
+    except (DataError, OutsideExecutionWindow, PushError, StateError, ValueError) as exc:
+        # Only controlled errors are included verbatim; never log request bodies or credentials.
+        status.update(status="failed", error_type=type(exc).__name__, error=str(exc))
+        save_summary(output, status)
+        LOG.error("任务失败 type=%s reason=%s", type(exc).__name__, str(exc))
+        return 1
+    except Exception as exc:
+        status.update(status="failed", error_type=type(exc).__name__, error="Unexpected internal error; no success claimed")
+        save_summary(output, status)
+        LOG.error("未预期异常 type=%s，任务失败；未记录原始响应或凭据", type(exc).__name__)
+        return 1
 
-    # 收益回测
-    ret_1x = data[symbol_1x].pct_change().fillna(0)
-    ret_2x = data[symbol_2x].pct_change().fillna(0)
-    ret_3x = data[symbol_3x].pct_change().fillna(0)
-    ret_spx = data[symbol_spx].pct_change().fillna(0)
-    
-    pos_series = pd.Series(signals, index=data.index).shift(1).fillna(2)
-    strat_daily_ret = pd.Series(0.0, index=data.index)
-    strat_daily_ret[pos_series == 1] = ret_1x
-    strat_daily_ret[pos_series == 2] = ret_2x
-    strat_daily_ret[pos_series == 3] = ret_3x
-    strat_daily_ret -= ((pos_series != pos_series.shift(1)).astype(int) * transaction_cost)
-    
-    strat_cum = (1 + strat_daily_ret).cumprod()
-    bench_cum_1x = (1 + ret_1x).cumprod()
-    bench_cum_2x = (1 + ret_2x).cumprod()
-    bench_cum_3x = (1 + ret_3x).cumprod()
-    bench_cum_spx = (1 + ret_spx).cumprod()
 
-    def get_period_ret(cum, days):
-        if len(cum) == 0: return 0.0
-        target = cum.index[-1] - timedelta(days=days)
-        idx = cum.index.searchsorted(target)
-        if idx >= len(cum): idx = len(cum) - 1
-        return (cum.iloc[-1] / cum.iloc[idx]) - 1
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true", default=truthy(os.environ.get("DRY_RUN", "false")))
+    parser.add_argument("--output-dir", default="output")
+    args = parser.parse_args()
+    output = Path(args.output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s", handlers=[logging.StreamHandler(), logging.FileHandler(output / "run.log", encoding="utf-8")])
+    return run(dry_run=args.dry_run, output_dir=output)
 
-    # ================= 输出看板 =================
-    price_now = data[indicator_asset].iloc[-1]
-    ma_now = sma.iloc[-1]
-    rsi_now = rsi.iloc[-1]
-    vix_now = vix_data.iloc[-1]
 
-    # 0. 标题与简介
-    is_open = "交易中" if (0<=now_ny.weekday()<=4 and 9.5<=now_ny.hour+now_ny.minute/60<=16) else "已收盘"
-    print(f"## 📅 纳指策略日报")
-    print(f"<div style='text-align:center; color:#999; font-size:12px; margin-bottom:10px;'>")
-    print(f"美东时间: {now_ny.strftime('%Y-%m-%d %H:%M')} | 市场状态: {is_open}")
-    print(f"</div>")
-
-    # 🔥 策略简介框 (这里会自动显示 symbol_1x 即 QQQ)
-    print(html_header("💡 策略逻辑"))
-    print(f"""
-    <div style='background-color:#eef6fc; padding:10px; border-radius:4px; font-size:12px; color:#555; border:1px solid #cfe2f3;'>
-    <b>核心逻辑：</b>基于均线(MA{ma_window})判断牛熊，结合 RSI(14) 抄底逃顶，叠加 VIX 恐慌过滤。<br>
-    <b>持仓轮动规则：</b>
-    <ul style='margin:5px 0 0 15px; padding:0;'>
-        <li><b>3x 进攻 ({symbol_3x})：</b>牛市回调 (RSI < {rsi_buy_3x})</li>
-        <li><b>2x 常态 ({symbol_2x})：</b>牛市震荡 ({rsi_buy_3x} < RSI < {rsi_sell_3x})</li>
-        <li><b>1x 防守 ({symbol_1x})：</b>熊市 (破均线) 或 恐慌 (VIX > {int(vix_threshold)})</li>
-    </ul>
-    </div>
-    """)
-
-    # 1. 市场体检
-    print(html_header("📊 市场体检"))
-    
-    if price_now < ma_now * (1 - bear_buffer):
-        status_html = "<span style='color:white; background-color:#dc3545; padding:2px 6px; border-radius:4px;'>❌ 熊市 (破位)</span>"
-    elif price_now < ma_now:
-        status_html = "<span style='color:black; background-color:#ffc107; padding:2px 6px; border-radius:4px;'>⚠️ 震荡 (均下)</span>"
-    else:
-        status_html = "<span style='color:white; background-color:#28a745; padding:2px 6px; border-radius:4px;'>✅ 牛市 (均上)</span>"
-    
-    if rsi_now < rsi_buy_3x: rsi_html = f"<b style='color:#007bff'>{rsi_now:.1f} (机会)</b>"
-    elif rsi_now > rsi_sell_3x: rsi_html = f"<b style='color:#dc3545'>{rsi_now:.1f} (过热)</b>"
-    else: rsi_html = f"{rsi_now:.1f} (中性)"
-
-    vix_color = "#28a745" if vix_now < 30 else "#dc3545"
-    vix_html = f"<span style='color:{vix_color}'><b>{vix_now:.2f}</b></span>"
-
-    health_data = {
-        f"趋势状态 <br><span style='font-size:10px; font-weight:normal; color:#999'>(牛熊分界 MA{ma_window})</span>": status_html,
-        "NDX 价格": f"<b>{price_now:.2f}</b> <span style='color:#999; font-size:11px;'>(MA: {ma_now:.2f})</span>",
-        f"RSI 指标 <br><span style='font-size:10px; font-weight:normal; color:#999'>(买<{rsi_buy_3x} / 卖>{rsi_sell_3x})</span>": rsi_html,
-        f"VIX 恐慌 <br><span style='font-size:10px; font-weight:normal; color:#999'>(熔断 > {int(vix_threshold)})</span>": vix_html
-    }
-    print(html_kv_table(health_data))
-
-    # 2. 业绩对比
-    print(html_header("🏆 业绩对比"))
-    periods = {
-        '1周':7, '1月':30, '3月':90, 
-        '半年':180, '1年':365, '3年':1095, '10年':3650
-    }
-    
-    perf_data = []
-    for label, days in periods.items():
-        s = get_period_ret(strat_cum, days)
-        b1 = get_period_ret(bench_cum_1x, days)
-        b2 = get_period_ret(bench_cum_2x, days)
-        b3 = get_period_ret(bench_cum_3x, days)
-        spy = get_period_ret(bench_cum_spx, days)
-        
-        icon = "🔥" if s > b2 else "" 
-        
-        perf_data.append({
-            "区间": label,
-            "策略": f"{s*100:.1f}%{icon}",
-            "QQQ": f"{b1*100:.1f}%",
-            "QLD": f"{b2*100:.1f}%",
-            "TQQQ": f"{b3*100:.1f}%",
-            "SPY": f"{spy*100:.1f}%"
-        })
-    print(df_to_compact_html(pd.DataFrame(perf_data)))
-
-    # 3. 调仓记录
-    print(html_header("📝 调仓记录"))
-    switch_history = []
-    temp_signal = signals[-1]
-    end_idx = len(signals) - 1
-    for i in range(len(signals)-2, -1, -1):
-        if signals[i] != temp_signal:
-            switch_history.append({
-                "日期": data.index[i+1].strftime('%m-%d'),
-                "操作": f"{etf_map[signals[i]]} -> {etf_map[temp_signal]}",
-                "持有": f"{end_idx - i}天"
-            })
-            temp_signal = signals[i]
-            end_idx = i
-        if len(switch_history) >= 5: break
-    
-    if switch_history:
-        print(df_to_compact_html(pd.DataFrame(switch_history)))
-    else:
-        print("<div style='color:#999; text-align:center; padding:10px;'>近期无调仓</div>")
-
-    # 4. 年度数据
-    print(html_header("📅 年度数据"))
-    df_perf = pd.DataFrame({'策略':strat_daily_ret, 'QQQ':ret_1x, 'QLD':ret_2x, 'TQQQ':ret_3x})
-    years = sorted(df_perf.index.year.unique(), reverse=True)
-    
-    year_data = []
-    for y in years:
-        if y < datetime.now().year - 10: break 
-        sub = df_perf[df_perf.index.year == y]
-        ys = (1+sub['策略']).prod()-1
-        yq = (1+sub['QQQ']).prod()-1
-        y2 = (1+sub['QLD']).prod()-1
-        y3 = (1+sub['TQQQ']).prod()-1
-        
-        tag = ""
-        if ys > y3: tag = "🔥"
-        elif y3 < -0.1 and ys > y3: tag = "🛡️"
-        
-        year_data.append({
-            "年份": y,
-            "策略": f"{ys*100:.1f}%{tag}",
-            "QQQ": f"{yq*100:.1f}%",
-            "QLD": f"{y2*100:.1f}%",
-            "TQQQ": f"{y3*100:.1f}%"
-        })
-    print(df_to_compact_html(pd.DataFrame(year_data)))
-
-    # 5. 今日行动
-    last = signals[-1]
-    prev = signals[-2]
-    
-    held_days = 0
-    for i in range(len(signals)-2, -1, -1):
-        if signals[i] == last: held_days += 1
-        else: break
-    held_days += 1
-    
-    color = "#dc3545" if last != prev else "#28a745"
-    action_text = "⚠️ 调仓交易 (ACTION)" if last != prev else "🔒 锁仓持有 (HOLD)"
-    bg_color = "#fff5f5" if last != prev else "#f0fff4"
-    
-    print(f"\n<div style='background-color:{bg_color}; padding:15px; border-left: 6px solid {color}; margin-top:20px; border-radius:4px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);'>")
-    print(f"<div style='font-size:18px; font-weight:bold; color:{color}; margin-bottom:8px;'>{action_text}</div>")
-    print(f"<div style='margin-bottom:4px;'>昨日持有: <span style='color:#666;'>{etf_map[prev]}</span></div>")
-    print(f"<div style='margin-bottom:4px;'>今日目标: <b style='color:#000; font-size:16px;'>{etf_map[last]}</b></div>")
-    print(f"<div style='font-size:12px; color:#999; margin-top:8px;'>已连续持仓: {held_days} 个交易日</div>")
-    print("</div>")
-    
-    if last != prev:
-        print(f"\n<div style='text-align:center; margin-top:10px; font-weight:bold; color:red;'>❗ 请立即卖出 {etf_map[prev]}，全仓买入 {etf_map[last]}</div>")
-
-# ================= 3. 主程序 =================
 if __name__ == "__main__":
-    output_buffer = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(output_buffer):
-            run_strategy_logic()
-    except Exception as e:
-        output_buffer.write(f"<br><br>❌ 程序执行出错: {str(e)}<br>")
-        traceback.print_exc(file=output_buffer)
-
-    final_output = output_buffer.getvalue()
-    print("--- 脚本执行完毕 ---")
-    
-    current_date = datetime.now(pytz.timezone('America/New_York')).strftime('%Y-%m-%d')
-    send_pushplus(f"纳指策略 ({current_date})", final_output)
+    raise SystemExit(main())
