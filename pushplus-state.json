@@ -7,6 +7,12 @@
       "created_at": "2026-10-22T15:51:52.776129+00:00",
       "content_sha256": "528bfc42b5c9f47510cf9c0186d153587a8df9e62ff13e0bccffdedb1f38f191",
       "short_code": "ca7b25318b6444c0b8f37095b63f543e"
+    },
+    "aebfd610122325931116a5d292d4850e34b95eef7d4801605c4fa77d4c60a79f": {
+      "status": "preparing",
+      "attempts": 1,
+      "created_at": "2026-10-23T15:42:55.590904+00:00",
+      "content_sha256": "689df2395d30145d9ce0aa661dd7a356aa15c63538f9303402f25f3a11d9294d"
     }
   }
 }
