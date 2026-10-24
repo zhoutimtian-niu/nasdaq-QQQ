@@ -41,10 +41,14 @@ class StrategyTests(unittest.TestCase):
     def setUpClass(cls):
         cls.f, cls.market = fixture()
 
-    def test_all_4199_signals_equal_frozen_original_source(self):
+    def test_all_4199_signals_equal_independently_frozen_vix_disabled_baseline(self):
         actual = calculate_signals(self.market.close)["signal"]
         self.assertEqual(len(actual), 4199)
-        np.testing.assert_array_equal(actual, self.f.expected_signal)
+        expected = pd.read_csv(FIXTURE.parent / "no_vix_signals.csv", index_col=0).signal
+        np.testing.assert_array_equal(actual, expected)
+        differences = actual.to_numpy() != self.f.expected_signal.to_numpy()
+        self.assertEqual(int(differences.sum()), 20)
+        self.assertTrue((actual.index[differences].year == 2020).all())
 
     def test_prefix_invariance(self):
         whole = calculate_signals(self.market.close)
@@ -57,23 +61,30 @@ class StrategyTests(unittest.TestCase):
         pd.testing.assert_frame_equal(calculate_signals(changed).iloc[:-100], calculate_signals(self.market.close).iloc[:-100])
 
     def test_rsi_hysteresis_and_strict_boundaries(self):
-        self.assertEqual(next_state(3, 110, 100, 70, 20), 3)
-        self.assertEqual(next_state(2, 110, 100, 65, 20), 2)
-        self.assertEqual(next_state(3, 110, 100, 80, 20), 3)
-        self.assertEqual(next_state(2, 110, 100, 64.9, 20), 3)
-        self.assertEqual(next_state(3, 110, 100, 80.1, 20), 2)
+        self.assertEqual(next_state(3, 110, 100, 70), 3)
+        self.assertEqual(next_state(2, 110, 100, 65), 2)
+        self.assertEqual(next_state(3, 110, 100, 80), 3)
+        self.assertEqual(next_state(2, 110, 100, 64.9), 3)
+        self.assertEqual(next_state(3, 110, 100, 80.1), 2)
 
     def test_bear_recovery_is_ql_d_before_three_times(self):
-        self.assertEqual(next_state(1, 101, 100, 20, 20), 2)
-        self.assertEqual(next_state(1, 100, 100, 20, 20), 1)
+        self.assertEqual(next_state(1, 101, 100, 20), 2)
+        self.assertEqual(next_state(1, 100, 100, 20), 1)
 
-    def test_vix_and_bear_override(self):
-        self.assertEqual(next_state(3, 110, 100, 20, 40.1), 1)
-        self.assertEqual(next_state(3, 98.9, 100, 20, 20), 1)
+    def test_bear_override(self):
+        self.assertEqual(next_state(3, 98.9, 100, 20), 1)
 
-    def test_missing_vix_fails(self):
+    def test_vix_is_unused_even_when_absent_missing_or_extreme(self):
+        original = calculate_signals(self.market.close)
         bad = self.market.close.copy()
-        bad.loc[bad.index[-1], "^VIX"] = np.nan
+        bad['^VIX'] = np.nan
+        pd.testing.assert_frame_equal(original, calculate_signals(bad))
+        bad['^VIX'] = 1000
+        pd.testing.assert_frame_equal(original, calculate_signals(bad))
+
+    def test_missing_ndx_fails(self):
+        bad = self.market.close.copy()
+        bad.loc[bad.index[-1], "^NDX"] = np.nan
         with self.assertRaises(ValueError):
             calculate_signals(bad)
 
@@ -121,9 +132,9 @@ class DataTests(unittest.TestCase):
         market = validate_frames(self.copied(), date(2026, 10, 21))
         self.assertEqual(len(market.close), 4199)
 
-    def test_missing_vix_column_fails(self):
+    def test_missing_ndx_column_fails(self):
         frames = self.copied()
-        del frames["^VIX"]
+        del frames["^NDX"]
         with self.assertRaises(DataError):
             validate_frames(frames, date(2026, 10, 21))
 
@@ -135,7 +146,7 @@ class DataTests(unittest.TestCase):
 
     def test_historical_gap_is_not_forward_filled(self):
         frames = self.copied()
-        frames["^VIX"].iloc[500, 0] = np.nan
+        frames["^NDX"].iloc[500, 0] = np.nan
         with self.assertRaises(DataError):
             validate_frames(frames, date(2026, 10, 21))
 
@@ -155,7 +166,7 @@ class DataTests(unittest.TestCase):
 
     def test_schema_error_fails(self):
         with self.assertRaises(DataError):
-            parse_chart({"chart": {"result": None, "error": {"description": "no"}}}, "^VIX")
+            parse_chart({"chart": {"result": None, "error": {"description": "no"}}}, "^NDX")
 
     def test_download_timeouts_have_three_bounded_attempts(self):
         get = Mock(side_effect=requests.Timeout("private diagnostic"))
@@ -355,7 +366,7 @@ class MainTests(unittest.TestCase):
     def test_data_failure_nonzero_and_notice_has_no_trade_target(self):
         publisher = Mock(return_value=Receipt("accepted_unverified"))
         with tempfile.TemporaryDirectory() as folder:
-            code = main.run(False, folder, self.now, loader=Mock(side_effect=DataError("missing VIX")), publisher=publisher)
+            code = main.run(False, folder, self.now, loader=Mock(side_effect=DataError("missing NDX")), publisher=publisher)
             self.assertEqual(code, 1)
             self.assertEqual(publisher.call_args.kwargs["category"], "data-health")
             self.assertNotIn("100%", publisher.call_args.args[2])

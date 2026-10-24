@@ -1,7 +1,8 @@
 # Nasdaq daily strategy
 
-Original QQQ / QLD / TQQQ trading rules are preserved. MA170, simple rolling
-RSI14 thresholds 65/80, VIX40, 1% bear buffer and state hysteresis are unchanged.
+QQQ / QLD / TQQQ rotation uses MA170, simple rolling RSI14 thresholds 65/80,
+1% bear buffer and state hysteresis. With user approval on 2026-10-24,
+the VIX40 condition and its data dependency were removed; other rules are unchanged.
 This is a model report, not an automated brokerage order.
 
 ## Run and verify
@@ -21,7 +22,9 @@ remote notification ledger. Manual Actions runs default to dry run.
 After an exchange session closes, dry run may preview the next trading session;
 the production sender never uses this preview exemption.
 
-The frozen fixture checks every original signal across 4,199 sessions. Other
+The frozen fixture checks all 4,199 signals against an independently frozen
+VIX-disabled version of the previous rules. Exactly 20 signal days differ from
+the original VIX-enabled model, all in 2020. Other
 tests cover look-ahead, next-open execution, overnight ownership, costs, holidays,
 DST, early close, missing/stale data, HTTP/business errors, asynchronous receipts,
 unknown results, persistent state, duplicates, and failure exit codes.
@@ -31,7 +34,7 @@ unknown results, persistent state, duplicates, and failure exit codes.
 - Read Yahoo's daily chart API directly, with finite timeouts, bounded retries,
   and query1/query2 recovery. This is the same data provider used by yfinance;
   query2 is not an independent data source. Missing required values are rejected,
-  not filled forward. All six assets must contain the expected completed session.
+  not filled forward. All five assets must contain the expected completed session.
 - Initialize the original state machine from TQQQ's first actual trading day.
   Exchange sessions determine the preceding signal date, including holidays and
   early closes. Intraday/current/future bars are excluded. Reports generated
