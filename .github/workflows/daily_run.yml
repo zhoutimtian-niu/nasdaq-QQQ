@@ -17,6 +17,11 @@ on:
         required: true
         default: false
         type: boolean
+      preview_push:
+        description: '明确发送一条样式预览（与正式日报独立去重，允许周末）'
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -56,12 +61,21 @@ jobs:
         run: python check_state.py
 
       - name: Run Strategy
+        if: github.event_name != 'workflow_dispatch' || !inputs.preview_push
         env:
           PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
           PUSHPLUS_ACCESS_KEY: ${{ secrets.PUSHPLUS_ACCESS_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: python main.py
+
+      - name: Send explicitly requested style preview
+        if: github.event_name == 'workflow_dispatch' && inputs.preview_push
+        env:
+          PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+          PUSHPLUS_ACCESS_KEY: ${{ secrets.PUSHPLUS_ACCESS_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python preview_push.py
 
       - name: Preserve report and diagnostics
         if: always()
