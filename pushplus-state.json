@@ -27,6 +27,9 @@
       "created_at": "2026-10-24T09:34:37.347177+00:00",
       "content_sha256": "12fcad6c5c6c134d52dc0f13cd237144311a8b00aa45468a4f29b499bfc73ef9",
       "short_code": "c2860cf798be497d8db12ac9cf4c5f28"
+    },
+    "storage-self-check-da447383fcb042e8bcbe7df93fa2ce10": {
+      "status": "self_test"
     }
   }
 }
