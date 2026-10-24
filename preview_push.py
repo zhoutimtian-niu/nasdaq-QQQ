@@ -23,6 +23,8 @@ def run(output_dir="output", generator=main.run, client=None, store=None):
     title = f"纳指策略｜{status['execution_date']}执行（{status['signal_date']}收盘）"
     title, content = style_preview(title, (output / "report.html").read_text(encoding="utf-8"))
     (output / "report.html").write_text(content, encoding="utf-8")
+    if len(title) > 100 or len(content) > 20000:
+        raise ValueError("Preview exceeds the ordinary PushPlus message size limit")
     # Reruns of this Actions run share a key; production daily keys are untouched.
     run_id = os.environ.get("GITHUB_RUN_ID")
     if not run_id:

@@ -17,25 +17,26 @@ def header(text, subtitle=""):
 
 def table(frame, returns=False):
     """Fixed-width, inline styles survive WeChat's stripped stylesheets."""
-    parts = ["<table cellpadding='0' cellspacing='0' style='width:100%;table-layout:fixed;border-collapse:collapse;font-size:11px;text-align:right;line-height:1.5'><thead><tr>"]
+    parts = ["<table cellpadding='0' cellspacing='0' style='width:100%;table-layout:fixed;border-collapse:collapse;font-size:11px;text-align:right;line-height:1.5;white-space:nowrap'><thead><tr>"]
     for i, column in enumerate(frame.columns):
         align = "left" if i == 0 else "right"
         bg = BLUE if column == "策略" else INK
         parts.append(f"<th style='padding:9px 3px;background:{bg};color:#fff;text-align:{align};font-weight:600'>{escape(str(column))}</th>")
     parts.append("</tr></thead><tbody>")
     for n, row in enumerate(frame.itertuples(index=False, name=None)):
-        parts.append("<tr>")
+        parts.append(f"<tr style='background:{'#f8fafc' if n % 2 == 0 else '#fff'};border-bottom:1px solid #e8edf5'>")
         for i, value in enumerate(row):
-            bg = "#eff6ff" if frame.columns[i] == "策略" else ("#f8fafc" if n % 2 == 0 else "#ffffff")
-            color, weight = INK, "600" if i == 0 or frame.columns[i] == "策略" else "400"
+            extra = "background:#eff6ff;font-weight:600;" if frame.columns[i] == "策略" else ""
+            if i == 0:
+                extra += "text-align:left;font-weight:600;"
+            color = INK
             if returns and i > 0:
                 if value is None or pd.isna(value):
                     value, color = "—", MUTED
                 else:
                     color = "#047857" if value > 0 else "#be123c" if value < 0 else MUTED
                     value = f"{value:+.1%}"
-            align = "left" if i == 0 else "right"
-            parts.append(f"<td style='padding:9px 3px;background:{bg};color:{color};font-weight:{weight};text-align:{align};border-bottom:1px solid #e8edf5;white-space:nowrap'>{escape(str(value))}</td>")
+            parts.append(f"<td style='padding:9px 3px;color:{color};{extra}'>{escape(str(value))}</td>")
         parts.append("</tr>")
     return "".join(parts) + "</tbody></table>"
 

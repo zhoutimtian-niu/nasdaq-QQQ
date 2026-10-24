@@ -37,13 +37,13 @@ class ReportPreviewTests(unittest.TestCase):
                 self.assertNotIn('请立即卖出', html)
                 self.assertEqual(html.count('<table '), 3)
                 self.assertEqual(html.count('<table '), html.count('</table>'))
-                self.assertEqual(html.count('<tr>'), html.count('</tr>'))
+                self.assertEqual(html.count('<tr'), html.count('</tr>'))
                 self.assertEqual(html.count('<div '), html.count('</div>'))
                 HTMLParser().feed(html)
                 preview_title, preview = style_preview(title, html)
                 self.assertTrue(preview_title.startswith('【样式预览】'))
                 self.assertIn('不作为新增调仓通知', preview)
-                self.assertLess(len(preview.encode()), 100000)
+                self.assertLess(len(preview), 20000)  # PushPlus ordinary-account limit includes HTML.
 
     def test_table_escapes_untrusted_labels_and_handles_missing_history(self):
         html = table(pd.DataFrame({'<script>': ['<img>'], '策略': [None]}), returns=True)
