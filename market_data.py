@@ -14,7 +14,7 @@ from market_calendar import expected_sessions
 from strategy import HISTORY_START
 
 LOG = logging.getLogger(__name__)
-SYMBOLS = ("QQQ", "QLD", "TQQQ", "SPY", "^NDX", "^VIX")
+SYMBOLS = ("QQQ", "QLD", "TQQQ", "SPY", "^NDX")
 
 
 class DataError(RuntimeError):
@@ -87,7 +87,7 @@ def validate_frames(frames, signal_date, calendar=None):
         if ((f["high"] + tolerance < f[["open", "close"]].max(axis=1)) | (f["low"] - tolerance > f[["open", "close"]].min(axis=1))).any():
             raise DataError(f"{symbol}: inconsistent OHLC prices")
         # A very large ETF return needs human review, not a silently corrupted trade.
-        limit = 3.0 if symbol == "^VIX" else 0.75
+        limit = 0.75
         if (f["adjclose"].pct_change(fill_method=None).abs() > limit).any():
             raise DataError(f"{symbol}: extreme adjusted return requires review")
         closes[symbol] = f["adjclose"]

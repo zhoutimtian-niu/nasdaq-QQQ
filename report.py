@@ -67,14 +67,14 @@ def build_report(market, signals, plan, now, performance=None):
     if plan.late:
         parts.append("<div style='padding:12px;background:#fffbeb;border-left:3px solid #d97706;color:#92400e;font-size:12px'>迟到提醒：本次生成时已经开盘。回测开盘价不代表当前可成交价格，请先核对实际仓位和市场。</div>")
 
-    ndx, vix, ma, rsi = float(market.close['^NDX'].iloc[-1]), float(market.close['^VIX'].iloc[-1]), float(latest['ma']), float(latest['rsi'])
+    ndx, ma, rsi = float(market.close['^NDX'].iloc[-1]), float(latest['ma']), float(latest['rsi'])
     gap = ndx / ma - 1
     trend = "趋势线上方" if gap > 0 else "趋势线下方"
     parts.append(header("市场体检", "趋势、强弱与波动，一眼看清"))
     metrics = [("纳指 NDX", f"{ndx:,.2f}", f"{trend} {gap:+.1%}", "#047857" if gap > 0 else "#be123c"),
                ("趋势线 MA170", f"{ma:,.2f}", "170日均线", MUTED),
                ("强弱 RSI14", f"{rsi:.1f}", "低于65 / 高于80触发切换", "#b45309" if rsi > 80 else BLUE),
-               ("恐慌指数 VIX", f"{vix:.2f}", "高于40触发防守", "#be123c" if vix > 40 else "#047857")]
+               ("防守线 MA170×99%", f"{ma * .99:,.2f}", "纳指跌破此线转为QQQ", "#be123c" if ndx < ma * .99 else "#047857")]
     parts.append("<table cellpadding='0' cellspacing='0' style='width:100%;table-layout:fixed'>")
     for j in (0, 2):
         parts.append("<tr>")
@@ -111,8 +111,8 @@ def build_report(market, signals, plan, now, performance=None):
         parts.append(f"<div style='padding:10px 2px;border-bottom:1px solid #e8edf5'><b style='font-size:13px;color:{INK}'>{before} <span style='color:{BLUE}'>→</span> {after}</b><br><span style='font-size:11px;color:{MUTED}'>{date.date()} → {execution}</span></div>")
     if changes.empty:
         parts.append(f"<p style='color:{MUTED}'>当前历史中没有目标切换。</p>")
-    parts.append(header("规则备忘", "原交易规则保持不变"))
-    parts.append(f"<div style='padding:12px;background:#f8fafc;border-radius:10px;font-size:11px;color:{MUTED}'>NDX 跌破 MA170 下方1%，或 VIX&gt;40，目标 QQQ；由QQQ恢复时须重新站上MA170，先回QLD。其余时候 RSI&lt;65 转TQQQ，RSI&gt;80 回QLD；65—80之间保留上一状态，可能继续持有TQQQ。RSI14采用简单滚动均值。</div>")
+    parts.append(header("规则备忘", "VIX过滤已移除 · 其余交易规则不变"))
+    parts.append(f"<div style='padding:12px;background:#f8fafc;border-radius:10px;font-size:11px;color:{MUTED}'>NDX 跌破 MA170 下方1%，目标 QQQ；由QQQ恢复时须重新站上MA170，先回QLD。其余时候 RSI&lt;65 转TQQQ，RSI&gt;80 回QLD；65—80之间保留上一状态，可能继续持有TQQQ。RSI14采用简单滚动均值。</div>")
     if performance is not None:
         parts.append(f"<p style='font-size:10px;color:{MUTED};margin-top:18px'>回测起点 {performance.index[0].date()}。信号形成后下一交易日开盘换仓，旧仓承担隔夜收益；每交易单边0.05%成本，计复权分红，未计个人税费。开盘后手动成交可能不同。历史收益不保证未来表现。</p>")
     parts.append(f"<div style='margin-top:18px;padding-top:12px;border-top:1px solid #e8edf5;font-size:10px;color:{MUTED}'>生成于 {now.astimezone(NY):%Y-%m-%d %H:%M %Z}<br>模型版本 {escape(MODEL_VERSION)}<br>模型未读取证券账户；推送受理不代表渠道投递或账户成交。</div>")
