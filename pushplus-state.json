@@ -29,10 +29,11 @@
       "short_code": "c2860cf798be497d8db12ac9cf4c5f28"
     },
     "83f5c13dedeb9cf7c10325b50c85660bd7f37cfdd872188bd8d1aca4385fe9c7": {
-      "status": "preparing",
+      "status": "accepted",
       "attempts": 1,
       "created_at": "2026-10-26T17:17:16.430247+00:00",
-      "content_sha256": "430d659061a8c311a39d1d23a44914c7702f518847a2990288df02dad86e8072"
+      "content_sha256": "430d659061a8c311a39d1d23a44914c7702f518847a2990288df02dad86e8072",
+      "short_code": "944e3a24d23640f8afb9078963c61ea0"
     }
   }
 }
