@@ -36,7 +36,7 @@
       "short_code": "944e3a24d23640f8afb9078963c61ea0"
     },
     "4224c3e2d18a0bd93b886899a90e50a20fa5d781f54ca4763fe9f65693f697fa": {
-      "status": "accepted",
+      "status": "accepted_unverified",
       "attempts": 1,
       "created_at": "2026-10-27T16:27:06.895869+00:00",
       "content_sha256": "f6bceef0337d8ee05a33e37e95475ba9f32f5642c08d886f8d086a560e1f9562",
