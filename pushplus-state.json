@@ -55,6 +55,12 @@
       "created_at": "2026-10-29T17:23:33.340752+00:00",
       "content_sha256": "6c63377baa09b57bc841901e3b3e6923ec153a434c1d16d947c2a6ea5c35ef47",
       "short_code": "d30cf695bae94e25b5895a0a85732ae1"
+    },
+    "9fa30e7ee7565bd4f32e85c101c72be4b5f69dc4832dd38429034fd373c0a106": {
+      "status": "preparing",
+      "attempts": 1,
+      "created_at": "2026-10-30T16:59:28.900380+00:00",
+      "content_sha256": "3b6bae1ffb2f2e8eb42a0bf92ba14ab215d1facbf72b1689b3ad06afdd5b2fa3"
     }
   }
 }
