@@ -85,10 +85,11 @@
       "short_code": "14888dcb87d94f268178c10fcfe53de0"
     },
     "ddc8c9bfeae68caae2bf9d668687d58ef6ef3673ec9afdbedc987af8e9b80b79": {
-      "status": "preparing",
+      "status": "accepted",
       "attempts": 1,
       "created_at": "2026-11-05T18:40:33.303561+00:00",
-      "content_sha256": "ff5d708fec9b37ca9ac828bce1bea3df24782c6a9bf035a758d4a57e4f167722"
+      "content_sha256": "ff5d708fec9b37ca9ac828bce1bea3df24782c6a9bf035a758d4a57e4f167722",
+      "short_code": "bfeda6885f9c4215bce180606171c60e"
     }
   }
 }
