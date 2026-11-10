@@ -97,9 +97,6 @@
       "created_at": "2026-11-06T17:53:33.604541+00:00",
       "content_sha256": "dd91290d81351bfeea071099a2047ee6b36345ac418c7daa69bccfa428f47847",
       "short_code": "b6aabb8921e444628aa91af985ee7796"
-    },
-    "storage-self-check-53a5830125a64c51b6e7c76d3a69f570": {
-      "status": "self_test"
     }
   }
 }
