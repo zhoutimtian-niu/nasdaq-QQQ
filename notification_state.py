@@ -118,6 +118,6 @@ class GitHubState:
 
 
 def state_store(output_dir):
-    if os.environ.get("GITHUB_ACTIONS") == "true":
+    if os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get('NOTIFICATION_STATE_BACKEND') == 'github':
         return GitHubState(os.environ.get("GITHUB_REPOSITORY"), os.environ.get("GITHUB_TOKEN"))
     return FileState(Path(output_dir) / "notification-state.json")

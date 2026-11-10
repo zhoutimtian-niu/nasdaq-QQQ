@@ -22,6 +22,11 @@ on:
         required: true
         default: false
         type: boolean
+      preview_email:
+        description: '明确发送一封标注为样式预览的备用邮件，不发微信、不改正式日报去重记录'
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -61,21 +66,49 @@ jobs:
         run: python check_state.py
 
       - name: Run Strategy
-        if: github.event_name != 'workflow_dispatch' || !inputs.preview_push
+        if: github.event_name != 'workflow_dispatch' || (!inputs.preview_push && !inputs.preview_email)
         env:
           PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
           PUSHPLUS_ACCESS_KEY: ${{ secrets.PUSHPLUS_ACCESS_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          BACKUP_EMAIL_ENABLED: ${{ vars.BACKUP_EMAIL_ENABLED }}
+          SMTP_HOST: ${{ vars.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT }}
+          SMTP_SECURITY: ${{ vars.SMTP_SECURITY }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
         run: python main.py
 
+      - name: Send explicitly requested email preview (no WeChat)
+        if: github.event_name == 'workflow_dispatch' && inputs.preview_email && !inputs.preview_push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BACKUP_EMAIL_ENABLED: ${{ vars.BACKUP_EMAIL_ENABLED }}
+          SMTP_HOST: ${{ vars.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT }}
+          SMTP_SECURITY: ${{ vars.SMTP_SECURITY }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+        run: python preview_email.py
+
       - name: Send explicitly requested style preview
-        if: github.event_name == 'workflow_dispatch' && inputs.preview_push
+        if: github.event_name == 'workflow_dispatch' && inputs.preview_push && !inputs.preview_email
         env:
           PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
           PUSHPLUS_ACCESS_KEY: ${{ secrets.PUSHPLUS_ACCESS_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python preview_push.py
+
+      - name: Reject conflicting preview modes without sending
+        if: github.event_name == 'workflow_dispatch' && inputs.preview_push && inputs.preview_email
+        run: |
+          echo "Choose only one preview mode. No preview has been sent."
+          exit 1
 
       - name: Preserve report and diagnostics
         if: always()
@@ -86,6 +119,7 @@ jobs:
             output/report.html
             output/run.json
             output/run.log
+            output/health-notice.html
             output/signals.csv
             output/daily_returns.csv
           if-no-files-found: warn
