@@ -112,7 +112,7 @@
       "short_code": "3f3ea199219341d9add638178c3a4722"
     },
     "7e0695ff5c03150dae53b0424d62c8bfde52298b476f678cd62c860bc4263f39": {
-      "status": "preparing",
+      "status": "smtp_accepted",
       "attempts": 1,
       "created_at": "2026-11-10T18:37:51.914816+00:00",
       "content_sha256": "d061f5eb1bf211eb773c1e92ed34e1465ea3d6f442db6f9be3acf6bba43b3bdc"
