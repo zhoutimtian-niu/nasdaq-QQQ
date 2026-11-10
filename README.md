@@ -1,5 +1,40 @@
 # Nasdaq daily strategy
 
+## Notification reliability update (prepared 2026-11-10)
+
+The notification update adds an independent SMTP HTML email route alongside
+WeChat. It preserves the existing report, model, data and WeChat deduplication
+key. Each route records its own result; SMTP acceptance is not an inbox/read
+receipt. `BACKUP_EMAIL_ENABLED=true` enables email only when all SMTP settings
+are present. Use TLS (`SMTP_SECURITY=ssl` or `starttls`); never use a QQ login
+password instead of its SMTP authorization code.
+
+Required email environment variables: `SMTP_HOST`, `SMTP_USERNAME`,
+`SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_TO`. Optional: `SMTP_PORT` (465 for SSL,
+587 for STARTTLS), `SMTP_SECURITY` (SSL by default). The workflow maps account
+fields from Actions Secrets and server settings from Actions Variables. No
+personal address or credential belongs in source control.
+
+If only PushPlus acceptance is available, with no confirmed WeChat result or
+SMTP acceptance, the normal sender exits **2** with `delivery_unverified`.
+Failures remain nonzero. A task arriving after the market close emits only
+a short-lived operational alert, never a rolled-over trading instruction.
+
+Manual `preview_email=true` generates a fresh dry-run report and explicitly
+sends one labeled HTML preview by SMTP only. It has separate stable deduplication
+from the daily report. Rerunning the same Actions run does not knowingly resend.
+Selecting both preview modes rejects the run without either preview.
+
+For an independently timed host directly running this program, set
+`NOTIFICATION_STATE_BACKEND=github` and the repository/token environment so both
+hosts share the existing CAS-protected ledger. This setting does not install
+a host, cloud service or schedule. GitHub cron alone still cannot guarantee
+punctual runs; changing the channel cannot repair an unstarted task.
+
+The older sections below describe the original engineering and strategy
+baseline. Their statement that no email is configured is superseded when the
+new SMTP route is explicitly enabled and verified.
+
 QQQ / QLD / TQQQ rotation uses MA170, simple rolling RSI14 thresholds 65/80,
 1% bear buffer and state hysteresis. With user approval on 2026-10-24,
 the VIX40 condition and its data dependency were removed; other rules are unchanged.

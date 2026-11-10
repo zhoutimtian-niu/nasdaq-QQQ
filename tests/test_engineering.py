@@ -378,7 +378,7 @@ class MainTests(unittest.TestCase):
             self.assertEqual(status["error_type"], "PushError")
 
     def test_optional_backtest_failure_preserves_valid_signal(self):
-        publisher = Mock(return_value=Receipt("accepted_unverified"))
+        publisher = Mock(return_value=Receipt("delivered"))
         with tempfile.TemporaryDirectory() as folder, patch("main.backtest_returns", side_effect=ValueError("bad metrics")):
             self.assertEqual(main.run(False, folder, self.now, loader=lambda _: self.market, publisher=publisher), 0)
             self.assertIn("业绩模块不可用", (Path(folder) / "report.html").read_text(encoding="utf-8"))
@@ -393,9 +393,11 @@ class MainTests(unittest.TestCase):
 
     def test_after_close_is_nonzero_and_no_push(self):
         publisher = Mock()
+        health = Mock(return_value=Receipt('smtp_accepted'))
         with tempfile.TemporaryDirectory() as folder:
-            self.assertEqual(main.run(False, folder, datetime(2026, 10, 22, 21, tzinfo=timezone.utc), publisher=publisher), 1)
+            self.assertEqual(main.run(False, folder, datetime(2026, 10, 22, 21, tzinfo=timezone.utc), publisher=publisher, health_publisher=health), 1)
         publisher.assert_not_called()
+        health.assert_called_once()
 
     def test_dry_run_after_close_can_preview_next_session_without_sending(self):
         publisher = Mock()

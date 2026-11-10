@@ -24,6 +24,7 @@ class DeliveryUnknown(PushError):
 class Receipt:
     status: str
     duplicate: bool = False
+    channels: dict | None = None
 
 
 class PushPlus:

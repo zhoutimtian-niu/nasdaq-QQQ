@@ -6,14 +6,17 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from datetime import timedelta
+from types import SimpleNamespace
 
 from backtest import backtest_returns
 from market_calendar import OutsideExecutionWindow, session_plan
 from market_data import DataError, load_market_data
-from notification_state import StateError, state_store
-from notify import PushError, PushPlus
+from notification_state import StateError
+from notify import PushError
 from report import build_report, data_failure_report
 from strategy import MODEL_VERSION, calculate_signals
+import delivery
 
 LOG = logging.getLogger(__name__)
 
@@ -33,13 +36,28 @@ def save_summary(output, values):
 
 
 def publish_report(plan, title, content, output, category="daily"):
-    client = PushPlus(os.environ.get("PUSH_TOKEN"), os.environ.get("PUSHPLUS_ACCESS_KEY"))
     raw_key = f"{MODEL_VERSION}|{plan.signal_date}|{plan.execution_date}|wechat|{category}"
     key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
-    return client.publish(key, title, content, plan.market_close, state_store(output))
+    # Preserve the old WeChat key exactly; email derives a separate route key.
+    return delivery.publish(key, title, content, plan.market_close, output)
 
 
-def run(dry_run=False, output_dir="output", now=None, loader=load_market_data, planner=session_plan, publisher=publish_report):
+def publish_window_failure(now, output, publisher):
+    """An operational alert with a short TTL, never a rolled/stale trading target."""
+    from zoneinfo import ZoneInfo
+    beijing_date = now.astimezone(ZoneInfo('Asia/Shanghai')).date()
+    plan = SimpleNamespace(signal_date='none', execution_date=beijing_date,
+                           market_close=now+timedelta(minutes=30))
+    title = f'纳指日报异常｜{beijing_date}｜任务启动过晚'
+    content = ('<div style="font-family:sans-serif;line-height:1.8;padding:24px">'
+               '<h2 style="color:#b33">日报未生成：已过本交易日收盘</h2>'
+               '<p>GitHub任务启动过晚，本次没有生成或发送买卖目标。</p>'
+               '<p>请检查定时运行记录。本通知不要求调仓，也不顺延成下一交易日指令。</p></div>')
+    (output/'health-notice.html').write_text(content, encoding='utf-8')
+    return publisher(plan, title, content, output, category='window-health')
+
+
+def run(dry_run=False, output_dir="output", now=None, loader=load_market_data, planner=session_plan, publisher=publish_report, health_publisher=None):
     now = now or datetime.now(timezone.utc)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -88,13 +106,31 @@ def run(dry_run=False, output_dir="output", now=None, loader=load_market_data, p
         else:
             receipt = publisher(plan, title, content, output)
             status.update(status="completed", notification=receipt.status, duplicate_suppressed=receipt.duplicate)
-            if receipt.status != "delivered":
-                LOG.warning("日报已受理或去重；最终投递尚未确认。查询需要PUSHPLUS_ACCESS_KEY")
+            if receipt.channels is not None:
+                status['notification_channels'] = receipt.channels
+            if receipt.status == 'smtp_accepted':
+                status['status'] = 'completed_backup_smtp_accepted'
+                LOG.warning('备用邮件服务器已受理；不是收件箱或阅读回执，微信状态见分渠道记录')
+            elif receipt.status != "delivered":
+                status.update(status='delivery_unverified', error='PushPlus仅受理，最终投递未确认；请配置AccessKey或独立邮箱')
+                save_summary(output, status)
+                LOG.error('PushPlus未确认投递，任务退出2，不显示为成功')
+                return 2
         save_summary(output, status)
         return 0
     except (DataError, OutsideExecutionWindow, PushError, StateError, ValueError) as exc:
         # Only controlled errors are included verbatim; never log request bodies or credentials.
         status.update(status="failed", error_type=type(exc).__name__, error=str(exc))
+        if isinstance(exc, OutsideExecutionWindow) and not dry_run:
+            # Injectable separate publisher keeps tests/dry runs from sending.
+            alert = health_publisher if health_publisher is not None else publisher
+            try:
+                receipt = publish_window_failure(now, output, alert)
+                status['failure_notice'] = receipt.status
+                if receipt.channels is not None:
+                    status['failure_notice_channels'] = receipt.channels
+            except (PushError, StateError, ValueError):
+                status['failure_notice'] = 'failed_or_unknown'
         save_summary(output, status)
         LOG.error("任务失败 type=%s reason=%s", type(exc).__name__, str(exc))
         return 1
