@@ -116,6 +116,12 @@
       "attempts": 1,
       "created_at": "2026-11-10T18:37:51.914816+00:00",
       "content_sha256": "d061f5eb1bf211eb773c1e92ed34e1465ea3d6f442db6f9be3acf6bba43b3bdc"
+    },
+    "d7fdecb079c12219746b64a538fc260c2a5e9073a5c457285ed7240330754f0a": {
+      "status": "preparing",
+      "attempts": 1,
+      "created_at": "2026-11-11T18:36:31.245307+00:00",
+      "content_sha256": "62c2f87a32e343f8d0c9b5b43fb7d54697908876deed09b67af423786aac608a"
     }
   }
 }
