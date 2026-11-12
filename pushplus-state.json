@@ -136,6 +136,12 @@
       "created_at": "2026-11-12T18:49:43.664696+00:00",
       "content_sha256": "128aa8f13d9ed2e5bbb2761396f30b82b7f64d304ff3bc0925a27feef3120fe3",
       "short_code": "1f4b18fde47943ecac5067a53c413367"
+    },
+    "7600dc8cee5333caf54cb6c980d829e9021cc7d28c293d50a26a1be1dbde2ca9": {
+      "status": "preparing",
+      "attempts": 1,
+      "created_at": "2026-11-12T18:49:51.795840+00:00",
+      "content_sha256": "128aa8f13d9ed2e5bbb2761396f30b82b7f64d304ff3bc0925a27feef3120fe3"
     }
   }
 }
