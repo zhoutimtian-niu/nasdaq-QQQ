@@ -157,10 +157,11 @@
       "content_sha256": "7be8b897032df6bb3999548aab0d93fac581dd649d4605df4df331d9362c6ed4"
     },
     "1e9696b4aab33d71519d829d48734e1832137010cc90ff289d55fcae6c08a02c": {
-      "status": "preparing",
+      "status": "accepted",
       "attempts": 1,
       "created_at": "2026-11-16T20:56:10.887292+00:00",
-      "content_sha256": "b06f8fabcec26da074e1c23b1c34afafe44bd23e51d8e20e412f27aeb7815a3c"
+      "content_sha256": "b06f8fabcec26da074e1c23b1c34afafe44bd23e51d8e20e412f27aeb7815a3c",
+      "short_code": "faff96a9c29e42ee9563abf55298cdfb"
     }
   }
 }
