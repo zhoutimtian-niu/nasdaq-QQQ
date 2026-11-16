@@ -1,12 +1,27 @@
 """Attempt independent routes even if one route fails; retain per-route state."""
 import logging
 import os
+import hashlib
 
 from backup_email import BackupEmail, EmailConfig
 from notification_state import StateError, state_store
 from notify import PushError, PushPlus, Receipt
 
 LOG = logging.getLogger(__name__)
+
+
+def has_submission(key, store):
+    """Read-only check for an accepted email or confirmed WeChat submission.
+
+    Used only to suppress a false overdue alert, never as a user read receipt.
+    Unverified PushPlus acceptance alone is deliberately insufficient.
+    """
+    email_key = hashlib.sha256(('backup-email-v1|' + key).encode()).hexdigest()
+    with store:
+        entries = store.load()['entries']
+        wechat, email = entries.get(key), entries.get(email_key)
+        return (isinstance(wechat, dict) and wechat.get('status') == 'delivered') or (
+            isinstance(email, dict) and email.get('status') == 'smtp_accepted')
 
 
 def publish(key, title, content, expires_at, output, primary=None, backup=None, store=None):

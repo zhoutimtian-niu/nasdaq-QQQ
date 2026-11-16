@@ -59,10 +59,10 @@ def build_report(market, signals, plan, now, performance=None):
              f"<p style='margin:0 0 16px;color:{MUTED};font-size:12px'>{plan.signal_date} 美东收盘 · {plan.execution_date} 执行</p>"]
     parts.append(f"<div style='background:{INK};border-radius:14px;padding:20px;color:#fff'>"
                  f"<span style='display:inline-block;background:{'#b45309' if changed else '#047857'};border-radius:20px;padding:2px 10px;font-size:11px;color:#fff'>{badge}</span>"
-                 "<div style='margin-top:12px;font-size:12px;color:#cbd5e1'>今日模型目标</div>"
+                 "<div style='margin-top:12px;font-size:12px;color:#cbd5e1'>计划执行目标</div>"
                  f"<div style='font-size:38px;font-weight:800;line-height:1.3;color:#fff'>{target}<span style='font-size:18px;font-weight:400;color:#cbd5e1'>　100%</span></div>"
                  f"<div style='margin-top:10px;font-size:12px;color:#dbeafe'>{f'目标切换：{old} → {target}' if changed else f'模型目标保持不变 · 上一目标 {old}'}</div></div>")
-    instruction = (f"模型由 {old} 切换至 {target}。请在美股常规交易时段核对实际仓位后自行执行。" if changed else "若实际仓位与模型目标一致，可继续持有；本次没有新的模型调仓。")
+    instruction = (f"模型由 {old} 切换至 {target}。请于{plan.execution_date}美股常规交易时段核对实际仓位后自行执行。" if changed else f"本报告对应{plan.execution_date}执行。若实际仓位与模型目标一致，可继续持有；本次没有新的模型调仓。")
     parts.append(f"<p style='margin:12px 2px;color:{MUTED};font-size:12px'>{instruction}</p>")
     if plan.late:
         parts.append("<div style='padding:12px;background:#fffbeb;border-left:3px solid #d97706;color:#92400e;font-size:12px'>迟到提醒：本次生成时已经开盘。回测开盘价不代表当前可成交价格，请先核对实际仓位和市场。</div>")

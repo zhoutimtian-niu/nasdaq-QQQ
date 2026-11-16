@@ -10,9 +10,9 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 from backtest import backtest_returns
-from market_calendar import OutsideExecutionWindow, session_plan
+from market_calendar import OutsideExecutionWindow, session_plan, expired_execution_plan
 from market_data import DataError, load_market_data
-from notification_state import StateError
+from notification_state import StateError, state_store
 from notify import PushError
 from report import build_report, data_failure_report
 from strategy import MODEL_VERSION, calculate_signals
@@ -35,9 +35,13 @@ def save_summary(output, values):
                 f.write(f"- {key}: {value}\n")
 
 
-def publish_report(plan, title, content, output, category="daily"):
+def notification_key(plan, category="daily"):
     raw_key = f"{MODEL_VERSION}|{plan.signal_date}|{plan.execution_date}|wechat|{category}"
-    key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+def publish_report(plan, title, content, output, category="daily"):
+    key = notification_key(plan, category)
     # Preserve the old WeChat key exactly; email derives a separate route key.
     return delivery.publish(key, title, content, plan.market_close, output)
 
@@ -57,17 +61,17 @@ def publish_window_failure(now, output, publisher):
     return publisher(plan, title, content, output, category='window-health')
 
 
-def run(dry_run=False, output_dir="output", now=None, loader=load_market_data, planner=session_plan, publisher=publish_report, health_publisher=None):
+def run(dry_run=False, output_dir="output", now=None, loader=load_market_data, planner=session_plan, publisher=publish_report, health_publisher=None, after_close=False):
     now = now or datetime.now(timezone.utc)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    status = {"model_version": MODEL_VERSION, "dry_run": dry_run, "generated_at_utc": now.isoformat()}
+    status = {"model_version": MODEL_VERSION, "dry_run": dry_run, "generated_at_utc": now.isoformat(), "report_timing": "after_close" if after_close else "pre_open"}
     try:
-        plan = planner(now, preview=dry_run)
+        plan = planner(now, preview=dry_run, after_close=True) if after_close else planner(now, preview=dry_run)
         if plan is None:
-            status.update(status="skipped_non_trading_day", notification="not_sent")
+            status.update(status="skipped_after_close_window" if after_close else "skipped_non_trading_day", notification="not_sent")
             save_summary(output, status)
-            LOG.info("美股非交易日，不生成买卖指令或发送日报")
+            LOG.info("当前不在收盘后发送窗口，未生成或发送日报" if after_close else "美股非交易日，不生成买卖指令或发送日报")
             return 0
         status.update(signal_date=str(plan.signal_date), execution_date=str(plan.execution_date), generated_after_open=plan.late)
         try:
@@ -122,6 +126,18 @@ def run(dry_run=False, output_dir="output", now=None, loader=load_market_data, p
         # Only controlled errors are included verbatim; never log request bodies or credentials.
         status.update(status="failed", error_type=type(exc).__name__, error=str(exc))
         if isinstance(exc, OutsideExecutionWindow) and not dry_run:
+            try:
+                expired = expired_execution_plan(now)
+                if expired and delivery.has_submission(notification_key(expired), state_store(output)):
+                    status.update(status='skipped_already_submitted', notification='not_resent',
+                                  signal_date=str(expired.signal_date), execution_date=str(expired.execution_date))
+                    status.pop('error_type', None)
+                    status.pop('error', None)
+                    save_summary(output, status)
+                    LOG.info('过期补跑对应日报已有有效发送记录，不重复发送或误报未生成')
+                    return 0
+            except StateError:
+                LOG.warning('未能核验此前发送记录，保留原过期保护与故障通知')
             # Injectable separate publisher keeps tests/dry runs from sending.
             alert = health_publisher if health_publisher is not None else publisher
             try:
@@ -145,11 +161,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", default=truthy(os.environ.get("DRY_RUN", "false")))
     parser.add_argument("--output-dir", default="output")
+    parser.add_argument("--after-close", action="store_true", default=truthy(os.environ.get("AFTER_CLOSE", "false")), help="使用最近完成的收盘，提前生成下一交易日日报；开盘后不在此模式发送")
     args = parser.parse_args()
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s", handlers=[logging.StreamHandler(), logging.FileHandler(output / "run.log", encoding="utf-8")])
-    return run(dry_run=args.dry_run, output_dir=output)
+    return run(dry_run=args.dry_run, output_dir=output, after_close=args.after_close)
 
 
 if __name__ == "__main__":

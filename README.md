@@ -1,5 +1,31 @@
 # Nasdaq daily strategy
 
+## Completed-close primary report (2026-11-16)
+
+The primary report is scheduled at 16:25 and 16:55 America/New_York, with
+13:25/13:55 slots for actual early-close sessions. New York timezone scheduling
+handles DST; exchange sessions determine which close is usable and the next
+execution day. A 20-minute post-close grace applies even to dry runs. A normal
+13:25 run skips before downloading data. Delays across NY midnight/weekends
+still use the most recent completed session, never a nonexistent holiday bar.
+
+`python main.py --after-close --dry-run` validates this path without publishing.
+`--after-close` (or `AFTER_CLOSE=true`) is an explicit separate mode: it only
+publishes between the completed close plus grace and the next exchange open.
+The original pre-open path retains its expired-instruction protection.
+
+Existing Beijing 19:03/19:25/19:47 jobs remain recovery opportunities. Both
+paths share the original model/signal-date/execution-date/channel/category key,
+so an early report does not cause a second daily email/WeChat POST at recovery.
+An overdue pre-open run suppresses its failure notice only if the matching
+expired report already has a confirmed WeChat or SMTP-accepted record. Unknown
+PushPlus acceptance alone is insufficient. State-read failures remain visible.
+
+Report text states the planned execution date rather than calling an overnight
+report today's target. The trading rule, history initialization, source input
+checks, report layout, and dual-route transport remain unchanged. GitHub cron
+may still run late/drop events; these are target start times, not delivery SLAs.
+
 ## Notification reliability update (prepared 2026-11-10)
 
 The notification update adds an independent SMTP HTML email route alongside
