@@ -5,6 +5,12 @@ on:
     # 北京时间周一至周五 19:03、19:25；19:47为有限补跑。
     # UTC固定，不随美国夏令时改变。GitHub schedule仍可能延迟。
     - cron: '03,25,47 11 * * 1-5'
+    # Main report: 25/55 minutes after the normal NY close; timezone handles DST.
+    - cron: '25,55 16 * * 1-5'
+      timezone: 'America/New_York'
+    # Early-close sessions: other days skip before data download or notification.
+    - cron: '25,55 13 * * 1-5'
+      timezone: 'America/New_York'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -14,6 +20,11 @@ on:
         type: boolean
       check_state:
         description: '额外验证远程去重存储（仅写入/读回/清除测试标记，不发微信）'
+        required: true
+        default: false
+        type: boolean
+      after_close:
+        description: '按最近已完成收盘提前生成下一交易日日报；默认保留原开盘前模式'
         required: true
         default: false
         type: boolean
@@ -72,6 +83,7 @@ jobs:
           PUSHPLUS_ACCESS_KEY: ${{ secrets.PUSHPLUS_ACCESS_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          AFTER_CLOSE: ${{ (github.event_name == 'schedule' && (github.event.schedule == '25,55 16 * * 1-5' || github.event.schedule == '25,55 13 * * 1-5')) || (github.event_name == 'workflow_dispatch' && inputs.after_close) }}
           BACKUP_EMAIL_ENABLED: ${{ vars.BACKUP_EMAIL_ENABLED }}
           SMTP_HOST: ${{ vars.SMTP_HOST }}
           SMTP_PORT: ${{ vars.SMTP_PORT }}
