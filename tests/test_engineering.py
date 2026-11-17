@@ -302,12 +302,15 @@ class PushTests(unittest.TestCase):
             self.send()
         self.session.post.assert_not_called()
 
-    def test_known_rejections_have_daily_attempt_limit(self):
+    def test_known_rejections_back_off_and_can_resume_after_three_failures(self):
         self.session.post.return_value = response(status=429)
+        now=[datetime.now(timezone.utc)]
+        client=PushPlus('token',session=self.session,clock=lambda:now[0])
         for _ in range(4):
-            with self.assertRaises(PushError):
-                self.send()
-        self.assertEqual(self.session.post.call_count, 3)
+            with self.assertRaises(PushError):self.send(client)
+            self.assertEqual(self.send(client).status,'retry_pending')
+            now[0]+=timedelta(minutes=31)
+        self.assertEqual(self.session.post.call_count,4)
 
 
 class StateTests(unittest.TestCase):
@@ -363,13 +366,13 @@ class MainTests(unittest.TestCase):
             self.assertNotIn("请立即卖出", content)
         publisher.assert_not_called()
 
-    def test_data_failure_nonzero_and_notice_has_no_trade_target(self):
+    def test_data_failure_records_diagnostics_without_external_notice(self):
         publisher = Mock(return_value=Receipt("accepted_unverified"))
         with tempfile.TemporaryDirectory() as folder:
             code = main.run(False, folder, self.now, loader=Mock(side_effect=DataError("missing NDX")), publisher=publisher)
             self.assertEqual(code, 1)
-            self.assertEqual(publisher.call_args.kwargs["category"], "data-health")
-            self.assertNotIn("100%", publisher.call_args.args[2])
+            publisher.assert_not_called()
+            self.assertEqual(json.loads((Path(folder)/'run.json').read_text(encoding='utf-8'))['failure_notice'],'suppressed')
 
     def test_missing_token_is_nonzero_and_never_claims_sent(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict("os.environ", {}, clear=True):
@@ -397,7 +400,7 @@ class MainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             self.assertEqual(main.run(False, folder, datetime(2026, 10, 22, 21, tzinfo=timezone.utc), publisher=publisher, health_publisher=health), 1)
         publisher.assert_not_called()
-        health.assert_called_once()
+        health.assert_not_called()
 
     def test_dry_run_after_close_can_preview_next_session_without_sending(self):
         publisher = Mock()

@@ -76,6 +76,29 @@ def expired_execution_plan(now, calendar=None):
                        cal.session_close(day).to_pydatetime(), True)
 
 
+def recovery_session_plan(now=None, calendar=None, **_):
+    """Latest completed close -> same next execution session until its close.
+
+    A recovery can arrive after the open; label it late without rolling an old
+    instruction into an unrelated date. The post-close grace still applies.
+    """
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError('Use timezone-aware time')
+    cal = calendar if calendar is not None else calendar_for(now)
+    day = pd.Timestamp(now.astimezone(NY).date())
+    signal = cal.date_to_session(day, direction='previous')
+    if now < cal.session_close(signal).to_pydatetime():
+        signal = cal.previous_session(signal)
+    closed = cal.session_close(signal).to_pydatetime()
+    execution = cal.next_session(signal)
+    opened = cal.session_open(execution).to_pydatetime()
+    deadline = cal.session_close(execution).to_pydatetime()
+    if now < closed + POST_CLOSE_GRACE or now >= deadline:
+        return None
+    return SessionPlan(execution.date(), signal.date(), opened, deadline, now >= opened)
+
+
 def expected_sessions(start, end, calendar=None):
     cal = calendar if calendar is not None else calendar_for(datetime.now(timezone.utc))
     return cal.sessions_in_range(pd.Timestamp(start), pd.Timestamp(end)).tz_localize(None)

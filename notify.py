@@ -4,6 +4,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from datetime import timedelta
 
 import requests
 
@@ -20,6 +21,25 @@ class DeliveryUnknown(PushError):
     pass
 
 
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def retry_due(entry, now):
+    value = entry.get('retry_after')
+    if value is None:
+        return True
+    try:
+        return now >= datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise StateError('通知重试时间无效') from None
+
+
+def schedule_retry(entry, now):
+    delay = min(1800, 60 * 2 ** min(entry['attempts'] - 1, 5))
+    entry['retry_after'] = (now + timedelta(seconds=delay)).isoformat()
+
+
 @dataclass(frozen=True)
 class Receipt:
     status: str
@@ -28,13 +48,14 @@ class Receipt:
 
 
 class PushPlus:
-    def __init__(self, token, access_key=None, session=None, sleep=time.sleep):
+    def __init__(self, token, access_key=None, session=None, sleep=time.sleep, clock=utc_now):
         if not token:
             raise PushError("PUSH_TOKEN 未配置，未发送日报")
         self.token = token
         self.access_key = access_key
         self.session = session or requests.Session()
         self.sleep = sleep
+        self.clock = clock
 
     def poll(self, short_code):
         if not self.access_key:
@@ -59,7 +80,8 @@ class PushPlus:
         return "accepted_pending"
 
     def publish(self, key, title, content, expires_at, store):
-        if expires_at <= datetime.now(timezone.utc):
+        now = self.clock()
+        if expires_at <= now:
             raise PushError("消息已超过有效交易窗口，未发送")
         with store:
             state = store.load()
@@ -71,17 +93,21 @@ class PushPlus:
                 return Receipt("delivered", duplicate=True)
             if entry and entry["status"] in ("accepted", "accepted_unverified", "accepted_pending"):
                 status = self.poll(entry["short_code"])
-                entry["status"] = status
-                store.save(state)
-                if status == "failed":
-                    raise PushError("PushPlus确认上次投递失败；下次有限补跑可重试")
-                return Receipt(status, duplicate=True)
+                if entry['status'] != status:
+                    entry["status"] = status
+                    store.save(state)
+                if status != "failed":
+                    return Receipt(status, duplicate=True)
+                raise PushError('PushPlus确认上次投递失败，启用备用渠道并保留后续重试')
             if entry and entry["status"] in ("preparing", "unknown"):
                 raise DeliveryUnknown("上次发送结果未知，已停止自动重发；需核对PushPlus记录以免重复")
             attempts = entry.get("attempts", 0) if entry else 0
-            if attempts >= 3:
-                raise PushError("当日已达到3次确认失败后的尝试上限")
-            entry = {"status": "preparing", "attempts": attempts + 1, "created_at": datetime.now(timezone.utc).isoformat(), "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}
+            if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+                raise StateError('微信尝试计数无效')
+            if entry and not retry_due(entry, now):
+                return Receipt('retry_pending', duplicate=True)
+            entry = {"status": "preparing", "attempts": attempts + 1, "created_at": now.isoformat(), "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}
+            schedule_retry(entry, now)
             state["entries"][key] = entry
             # Bounded nonsecret ledger: keep the most recently written 120 notification keys.
             if len(state["entries"]) > 120:

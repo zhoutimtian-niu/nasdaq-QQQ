@@ -61,11 +61,15 @@ class EmailTests(unittest.TestCase):
         self.assertEqual(self.smtp.send_message.call_count,1)
         self.assertNotIn('test-private-password',self.store.path.read_text())
 
-    def test_explicit_rejection_retries_at_most_three_times(self):
-        self.smtp.send_message.side_effect = smtplib.SMTPDataError(550,b'private server response')
+    def test_explicit_rejection_has_persistent_backoff_without_three_try_ceiling(self):
+        now=[datetime.now(timezone.utc)]
+        self.client.clock=lambda:now[0]
+        self.smtp.send_message.side_effect=smtplib.SMTPDataError(550,b'private response')
         for _ in range(4):
             with self.assertRaises(PushError):self.send()
-        self.assertEqual(self.smtp.send_message.call_count,3)
+            self.assertEqual(self.send().status,'retry_pending')
+            now[0]+=timedelta(minutes=31)
+        self.assertEqual(self.smtp.send_message.call_count,4)
 
     def test_auth_failure_safe_and_no_data_sent(self):
         self.smtp.login.side_effect = smtplib.SMTPAuthenticationError(535,b'test-private-password')
@@ -119,53 +123,60 @@ class EmailTests(unittest.TestCase):
 
 
 class RouterTests(unittest.TestCase):
-    def send(self,primary,backup):
-        return delivery.publish('key','title','html',datetime.now(timezone.utc)+timedelta(days=1),'unused',primary=primary,backup=backup,store=Mock())
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.store=FileState(Path(self.tmp.name)/'state.json')
+        self.now=datetime.now(timezone.utc)
 
-    def test_primary_unknown_does_not_block_independent_email(self):
+    def send(self,primary,backup):
+        return delivery.publish('key','title','html',self.now+timedelta(days=1),self.tmp.name,
+                                primary=primary,backup=backup,store=self.store,clock=lambda:self.now)
+
+    def test_primary_unknown_waits_then_uses_normal_email(self):
         primary=Mock();primary.publish.side_effect=DeliveryUnknown('unknown')
         backup=Mock();backup.publish.return_value=Receipt('smtp_accepted')
-        r=self.send(primary,backup)
-        self.assertEqual(r.status,'smtp_accepted')
-        self.assertEqual(r.channels['wechat']['error_type'],'DeliveryUnknown')
+        self.assertEqual(self.send(primary,backup).status,'retry_pending')
+        backup.publish.assert_not_called()
+        self.now+=timedelta(minutes=10)
+        self.assertEqual(self.send(primary,backup).status,'smtp_accepted')
         backup.publish.assert_called_once()
+        self.assertEqual(backup.publish.call_args.args[1:3],('title','html'))
 
-    def test_backup_failure_does_not_hide_confirmed_wechat(self):
+    def test_confirmed_wechat_never_calls_email(self):
         primary=Mock();primary.publish.return_value=Receipt('delivered')
-        backup=Mock();backup.publish.side_effect=PushError('mail rejected')
-        r=self.send(primary,backup)
-        self.assertEqual(r.status,'delivered')
-        self.assertEqual(r.channels['email']['status'],'error')
+        backup=Mock();backup.publish.side_effect=AssertionError('no double delivery')
+        self.assertEqual(self.send(primary,backup).status,'delivered')
+        backup.publish.assert_not_called()
 
-    def test_unverified_wechat_stays_unverified_when_email_disabled(self):
+    def test_unverified_wechat_remains_pending_when_email_disabled(self):
         primary=Mock();primary.publish.return_value=Receipt('accepted_unverified')
         with patch.dict('os.environ',{},clear=True):
-            r=delivery.publish('k','t','h',datetime.now(timezone.utc)+timedelta(days=1),'unused',primary=primary,store=Mock())
-        self.assertEqual(r.status,'accepted_unverified')
+            self.assertEqual(self.send(primary,None).status,'retry_pending')
+            self.now+=timedelta(minutes=11)
+            self.assertEqual(self.send(primary,None).status,'retry_pending')
 
     def test_missing_push_token_cannot_disable_configured_email(self):
         backup=Mock();backup.publish.return_value=Receipt('smtp_accepted')
         with patch.dict('os.environ',{},clear=True):
-            r=delivery.publish('k','t','h',datetime.now(timezone.utc)+timedelta(days=1),'unused',backup=backup,store=Mock())
-        self.assertEqual(r.status,'smtp_accepted')
+            self.assertEqual(self.send(None,backup).status,'smtp_accepted')
 
-    def test_both_failed_is_never_success(self):
+    def test_both_failed_remain_pending_never_success(self):
         primary=Mock();primary.publish.side_effect=PushError('primary fail')
         backup=Mock();backup.publish.side_effect=PushError('backup fail')
-        with self.assertRaises(PushError):self.send(primary,backup)
+        self.assertEqual(self.send(primary,backup).status,'retry_pending')
 
-    def test_old_delivered_wechat_dedup_does_not_suppress_new_email(self):
-        with tempfile.TemporaryDirectory() as folder:
-            store=FileState(Path(folder)/'state.json')
-            store.save({'version':1,'entries':{'key':{'status':'delivered'}}})
-            session=Mock()
-            primary=PushPlus('test-token',session=session)
-            smtp=Mock();smtp.send_message.return_value={}
-            backup=BackupEmail(config(),connector=lambda:smtp)
-            r=delivery.publish('key','t','h',datetime.now(timezone.utc)+timedelta(days=1),folder,primary=primary,backup=backup,store=store)
-            self.assertEqual(r.status,'delivered')
-            session.post.assert_not_called()
-            smtp.send_message.assert_called_once()
+    def test_old_delivered_wechat_suppresses_both_routes(self):
+        self.store.save({'version':1,'entries':{'key':{'status':'delivered'}}})
+        primary=Mock();backup=Mock()
+        r=self.send(primary,backup)
+        self.assertEqual(r.status,'delivered');self.assertTrue(r.duplicate)
+        primary.publish.assert_not_called();backup.publish.assert_not_called()
+
+    def test_accepted_fallback_suppresses_later_wechat_and_email(self):
+        self.store.save({'version':1,'entries':{delivery.email_key('key'):{'status':'smtp_accepted'}}})
+        primary=Mock();backup=Mock()
+        self.assertEqual(self.send(primary,backup).status,'smtp_accepted')
+        primary.publish.assert_not_called();backup.publish.assert_not_called()
 
 
 class MainReliabilityTests(unittest.TestCase):
@@ -179,7 +190,7 @@ class MainReliabilityTests(unittest.TestCase):
             code=main.run(False,folder,self.now,loader=lambda _:self.market,publisher=Mock(return_value=Receipt('accepted_unverified')))
             d=json.loads((Path(folder)/'run.json').read_text(encoding='utf-8'))
         self.assertEqual(code,2)
-        self.assertEqual(d['status'],'delivery_unverified')
+        self.assertEqual(d['status'],'delivery_retry_pending')
 
     def test_smtp_accepted_is_explicit_with_per_channel_diagnostics(self):
         receipt=Receipt('smtp_accepted',channels={'wechat':{'status':'accepted_unverified'},'email':{'status':'smtp_accepted'}})
@@ -190,16 +201,15 @@ class MainReliabilityTests(unittest.TestCase):
         self.assertEqual(d['status'],'completed_backup_smtp_accepted')
         self.assertEqual(d['notification_channels']['wechat']['status'],'accepted_unverified')
 
-    def test_postclose_emits_only_operational_notice_and_stays_failed(self):
+    def test_postclose_suppresses_notice_and_stays_failed(self):
         loader=Mock();trade=Mock();health=Mock(return_value=Receipt('smtp_accepted'))
         with tempfile.TemporaryDirectory() as folder:
             code=main.run(False,folder,datetime(2026,11,9,21,24,tzinfo=timezone.utc),loader=loader,publisher=trade,health_publisher=health)
-            content=(Path(folder)/'health-notice.html').read_text(encoding='utf-8')
+            summary=json.loads((Path(folder)/'run.json').read_text(encoding='utf-8'))
         self.assertEqual(code,1)
         loader.assert_not_called();trade.assert_not_called()
-        self.assertIn('没有生成或发送买卖目标',content)
-        self.assertNotIn('TQQQ',content)
-        self.assertEqual(health.call_args.kwargs['category'],'window-health')
+        health.assert_not_called()
+        self.assertEqual(summary['failure_notice'],'suppressed')
 
     def test_dry_run_does_not_read_mail_config_or_send_either_route(self):
         with tempfile.TemporaryDirectory() as folder,patch('delivery.EmailConfig.from_environment',side_effect=AssertionError('must not read credentials')),patch('main.publish_report',side_effect=AssertionError('must not send')):
