@@ -205,7 +205,7 @@
     "8df7069c4ca987d79895b186fc2b24c27f4ed42a17be4c09d0ce36fdceddcba5": {
       "status": "routing",
       "created_at": "2026-11-17T21:22:35.814708+00:00",
-      "fallback_started": false
+      "fallback_started": true
     },
     "a6799a66a0e635d659615f799bad2a76241b414749dd9be743b608157869f135": {
       "status": "accepted_unverified",
