@@ -188,11 +188,12 @@
       "fallback_started": false
     },
     "468bd9f73ffd629bc9bf7c39e1ca91c0aa1e6f69df9a121bdce46645668ca90e": {
-      "status": "preparing",
+      "status": "accepted",
       "attempts": 1,
       "created_at": "2026-11-17T03:31:25.072626+00:00",
       "content_sha256": "82852de836e23e744e235e4a81853e46111275e4f44fc97e83fc9cb1cf2d9217",
-      "retry_after": "2026-11-17T03:32:25.072626+00:00"
+      "retry_after": "2026-11-17T03:32:25.072626+00:00",
+      "short_code": "9e1a30d5e1a64fe780c1b32df6385377"
     }
   }
 }
