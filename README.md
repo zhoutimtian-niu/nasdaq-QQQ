@@ -111,73 +111,79 @@ unknown results, persistent state, duplicates, and failure exit codes.
 - Catch controlled failures with a nonzero exit, preserve useful diagnostics,
   and never log raw vendor bodies or credentials.
 
-## GitHub Actions and notification state
+## GitHub Actions and notification recovery
 
-The two existing Beijing time slots, 19:03 and 19:25 on weekdays, remain; 19:47
-adds a finite recovery opportunity. `concurrency` serializes runs. GitHub's
-schedule can still be delayed or dropped: this cannot guarantee punctual delivery.
-A host that directly runs the same code with an independent clock is needed for
-a stronger scheduling guarantee. Merely dispatching Actions from another clock
-still inherits Actions queue delays.
+The existing post-close and pre-open schedules remain. A UTC `17,47 * * * *`
+recovery schedule adds another opportunity every30minutes, including weekends
+for Friday-close/Monday-execution reports. GitHub may delay or omit schedules;
+this is not a guarantee of exact delivery time or eventual success during a
+permanent provider/configuration outage. `concurrency` serializes senders.
 
-`PUSH_TOKEN` is still the only mandatory PushPlus secret. Keep the existing
-secret; no value is stored in code or the delivery ledger.
+`recover.py` pins one signal/execution pair per job, retries temporary data and
+transport failures for up to11minutes, then leaves durable state for the next
+scheduled run. Retry pauses are15/30/60seconds within a job; confirmed transport
+rejections have persistent exponential backoff from1minute to30minutes. There
+is no lifetime three-attempt ceiling. Data must pass the full existing validation
+before a normal report is sent; no filling missing prices or stale HTML fallback.
+A validated data load is reused within a job while waiting for delivery receipts.
+The actual execution-session close is a hard expiry. Early-close calendars and
+the20minute post-close data grace remain in force. Late reports retain their
+original dates and explicitly label generation after the open.
 
-Optional `PUSHPLUS_ACCESS_KEY` enables the official asynchronous status query.
-Without it, a valid send response is recorded as `accepted_unverified`, never
-described as confirmed channel delivery. An AccessKey is different from the
-PUSH_TOKEN. Even confirmed provider delivery is not a user read receipt.
+### WeChat first, normal-report email fallback
 
-The workflow `GITHUB_TOKEN` needs `contents: write` to maintain a dedicated
-`notification-state` branch with `pushplus-state.json`. This branch is created
-only on the first real send or explicit storage self-check. It contains bounded, nonsecret
-per-report keys, status, content hashes and provider receipt identifiers.
-It does not change the strategy/default-branch source. Source CI ignores pushes
-to this state branch. Local runs use an atomic file and lock instead.
+- First submit the normal HTML report to PushPlus. If provider status confirms
+  delivery, do not send email.
+- If PushPlus explicitly rejects/fails, use the configured independent SMTP
+  immediately. If receipt status is unknown/pending, poll the existing receipt;
+  after10minutes from the first routing attempt use normal-report SMTP fallback.
+  A missing PushPlus token cannot prevent SMTP fallback.
+- Either confirmed WeChat delivery or SMTP acceptance stops all further sends
+  for that logical report. SMTP acceptance is not an inbox/read receipt.
+- Never send a data-health/window-health failure notice to either channel.
+  Failures remain visible in Actions summaries/artifacts with nonzero exit codes;
+  recovery continues within the report's validity window.
+- A lost WeChat POST response is not blindly reposted without a receipt. The
+  fallback can still deliver the normal report. For SMTP DATA timeouts, the
+  production router retries after30minutes using the same Message-ID. A lost
+  response can have hidden a real delivery, so this may produce a duplicate;
+  SMTP cannot promise exactly-once delivery from Message-ID alone.
 
-For a deployment check, manually run the daily workflow with `dry_run=true` and
-`check_state=true`. The separate storage step writes, reads and removes a random
-test marker using the job's actual GitHub token; the main dry run still never
-sends a message or writes notification state. This verifies real persistence
-permissions before enabling production; the marker contains no message/token.
+`PUSH_TOKEN` remains the send credential. The optional `PUSHPLUS_ACCESS_KEY`
+enables the official asynchronous receipt query. This repository currently
+cannot confirm delivery when it is absent, so the10minute uncertainty fallback
+applies even if the user's WeChat happened to receive the message. Official
+AccessKeys expire (currently2hours); a static long-lived GitHub Secret is not
+a permanent receipt solution. OpenAPI token refresh requires separate
+secretKey/developer/IP configuration; this patch does not claim to configure it.
+See the official OpenAPI documentation before enabling a maintained receipt
+credential or a callback receiver.
 
-The persistence ordering is intentional: if durable storage fails, do not send.
-If a POST times out, returns an ambiguous server error or the process dies after
-the preparing record, do not blindly repeat it. This favors avoiding duplicate
-trading instructions over claiming impossible exactly-once delivery.
+SMTP uses the existing `BACKUP_EMAIL_ENABLED` variable and `SMTP_*` configuration
+via GitHub Secrets; no secrets or raw responses are logged. Report styling,
+strategy rules, trading thresholds and backtest engine are unchanged.
 
-## Troubleshooting / recovery
+### Durable state and verification
 
-Inspect the Actions job summary and `strategy-report-*` artifact first:
+The existing `notification-state` branch and per-channel keys are preserved.
+A separate hashed routing record tracks the first attempt and fallback state.
+State writes precede network sends. Missing/unreadable state never resets into
+an empty ledger or causes an unsafe send; compare-and-swap and workflow
+concurrency protect against racing writers. Already-delivered reports skip
+price downloads in scheduled recovery jobs. Neither prior failure notices nor
+unknown PushPlus acceptance are considered successful daily report delivery.
 
-- `failed` + DataError: no valid daily trading target was issued. A separate
-  data-health notice may be sent once; later scheduled recovery rechecks input.
-- `accepted_unverified`: provider accepted the request; delivery is not verified.
-  Configure the optional AccessKey or inspect PushPlus's latest requests page.
-- `accepted_pending`: receipt polling has not yet confirmed a final result.
-  Subsequent runs query the existing receipt instead of sending again.
-- `failed` business rejection: a later recovery may retry, at most three attempts
-  per report key. Account quota or permission problems must be fixed upstream.
-- `preparing` / `unknown`: inspect the matching request on PushPlus. If delivered,
-  update that ledger entry to `delivered`. Only after confirming it was **not**
-  accepted should an operator set the entry to `failed` to allow a bounded retry.
-  Do not delete the whole ledger. The optional AccessKey can query a known receipt.
-- A local stale `.lock` also needs inspection before manual removal.
+Validate with a manually dispatched `dry_run=true` (the safe default). It neither
+sends nor reads SMTP credentials nor writes remote delivery records. Optional
+`check_state=true` separately writes/reads/removes a nonsecret test marker.
+Diagnostics retain `run.json`, `run.log`, HTML and signal/performance artifacts.
+A local or CI failure is not a user notification of a trading target.
 
-The ledger key uses strategy version + signal session + execution session +
-channel + category. It does not assert the user completed a brokerage trade.
+### Rollback
 
-No independent email/other-channel alert is configured here: Actions failure
-status and artifacts are observable, but a platform outage needs a genuinely
-independent monitor/channel. Do not rely on PushPlus to report its own outage.
-
-## Rollback
-
-Do not remove the ledger during rollback. Keep the current production job and
-its secrets unchanged until replacement checks pass. Code rollback can revert
-the engineering commit, but the historical old sender did not honor this ledger
-and may send duplicates; pause scheduled sending while intentionally rolling
-back and check whether that day's report was already accepted.
+Preserve delivery state during rollback. Do not delete report keys to force a
+resend. Restoring the previous source restores its double-send and failure-notice
+behavior; check existing receipts before intentionally triggering a live run.
 
 ## Reference
 

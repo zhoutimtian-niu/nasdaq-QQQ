@@ -80,7 +80,9 @@ def validate_frames(frames, signal_date, calendar=None):
         f = frames[symbol].loc[HISTORY_START:pd.Timestamp(signal_date)].reindex(dates)
         fields = f[["open", "high", "low", "close", "adjclose"]]
         if fields.isna().any().any() or not np.isfinite(fields.to_numpy()).all():
-            raise DataError(f"{symbol}: missing/stale/invalid required session prices")
+            invalid = ~np.isfinite(fields.to_numpy()).all(axis=1)
+            bad_dates = ','.join(str(d.date()) for d in fields.index[invalid][:5])
+            raise DataError(f"{symbol}: missing/stale/invalid required session prices; dates={bad_dates}; count={int(invalid.sum())}")
         if (fields <= 0).any().any():
             raise DataError(f"{symbol}: non-positive prices")
         tolerance = f["close"] * 1e-5

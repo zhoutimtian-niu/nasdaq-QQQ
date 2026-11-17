@@ -119,7 +119,7 @@ class PostCloseIntegrationTests(unittest.TestCase):
         self.assertEqual(main.notification_key(early),original)
         self.assertEqual(main.notification_key(pre),original)
 
-    def test_both_routes_post_only_once_across_early_and_fallback(self):
+    def test_unverified_wechat_waits_then_fallback_posts_once(self):
         early=session_plan(self.early,after_close=True);pre=session_plan(self.preopen)
         session=Mock();session.post.return_value=response()
         primary=PushPlus('test-token',session=session)
@@ -128,8 +128,10 @@ class PostCloseIntegrationTests(unittest.TestCase):
         expiry=datetime.now(UTC)+timedelta(days=1)
         with tempfile.TemporaryDirectory() as folder:
             store=FileState(Path(folder)/'state.json')
-            for plan in (early,pre):
-                delivery.publish(main.notification_key(plan),'title','html',expiry,folder,primary=primary,backup=backup,store=store)
+            now=[datetime.now(UTC)]
+            for i,plan in enumerate((early,pre,pre)):
+                now[0]+=timedelta(minutes=11 if i else 0)
+                delivery.publish(main.notification_key(plan),'title','html',expiry,folder,primary=primary,backup=backup,store=store,clock=lambda:now[0])
         self.assertEqual(session.post.call_count,1)
         self.assertEqual(smtp.send_message.call_count,1)
 
@@ -146,8 +148,7 @@ class PostCloseIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             code=main.run(False,folder,self.early,loader=Mock(side_effect=DataError('missing close')),publisher=publisher,after_close=True)
         self.assertEqual(code,1)
-        self.assertEqual(publisher.call_args.kwargs['category'],'data-health')
-        self.assertNotIn('100%',publisher.call_args.args[2])
+        publisher.assert_not_called()
 
     def test_overdue_fallback_does_not_send_false_failure_after_email_submission(self):
         now=datetime(2026,11,13,21,25,tzinfo=UTC);plan=expired_execution_plan(now)
@@ -177,7 +178,7 @@ class PostCloseIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder,patch('main.state_store',side_effect=StateError('cannot read')):
             code=main.run(False,folder,datetime(2026,11,13,21,25,tzinfo=UTC),publisher=Mock(),health_publisher=health)
         self.assertEqual(code,1)
-        health.assert_called_once()
+        health.assert_not_called()
 
     def test_cli_explicitly_selects_after_close_with_safe_dry_run(self):
         with patch('main.run',return_value=0) as run,patch('main.logging.FileHandler'),patch('main.logging.basicConfig'),tempfile.TemporaryDirectory() as folder:
@@ -193,8 +194,8 @@ class PostCloseWorkflowTests(unittest.TestCase):
         w=yaml.load((root/'.github/workflows/daily_run.yml').read_text(encoding='utf-8'),Loader=yaml.BaseLoader)
         schedules=w['on']['schedule']
         self.assertEqual(schedules[0]['cron'],'03,25,47 11 * * 1-5')
-        self.assertEqual({x['cron'] for x in schedules[1:]},{'25,55 16 * * 1-5','25,55 13 * * 1-5'})
-        self.assertTrue(all(x['timezone']=='America/New_York' for x in schedules[1:]))
+        self.assertEqual({x['cron'] for x in schedules[1:3]},{'25,55 16 * * 1-5','25,55 13 * * 1-5'})
+        self.assertTrue(all(x['timezone']=='America/New_York' for x in schedules[1:3]))
         self.assertEqual(w['on']['workflow_dispatch']['inputs']['after_close']['default'],'false')
         expression=next(s for s in w['jobs']['build']['steps'] if s['name']=='Run Strategy')['env']['AFTER_CLOSE']
         self.assertIn('inputs.after_close',expression)

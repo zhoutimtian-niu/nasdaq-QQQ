@@ -11,6 +11,9 @@ on:
     # Early-close sessions: other days skip before data download or notification.
     - cron: '25,55 13 * * 1-5'
       timezone: 'America/New_York'
+    # Durable recovery: each run checks the latest valid report's ledger first.
+    # Confirmed WeChat / SMTP acceptance skips data download and further sends.
+    - cron: '17,47 * * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -49,7 +52,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 18
     permissions:
       # Dedicated notification-state branch; no token is ever written to that branch.
       contents: write
@@ -84,6 +87,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
           AFTER_CLOSE: ${{ (github.event_name == 'schedule' && (github.event.schedule == '25,55 16 * * 1-5' || github.event.schedule == '25,55 13 * * 1-5')) || (github.event_name == 'workflow_dispatch' && inputs.after_close) }}
+          RECOVERY_ONLY: ${{ github.event_name == 'schedule' && github.event.schedule == '17,47 * * * *' }}
           BACKUP_EMAIL_ENABLED: ${{ vars.BACKUP_EMAIL_ENABLED }}
           SMTP_HOST: ${{ vars.SMTP_HOST }}
           SMTP_PORT: ${{ vars.SMTP_PORT }}
@@ -92,7 +96,7 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           SMTP_TO: ${{ secrets.SMTP_TO }}
-        run: python main.py
+        run: python recover.py
 
       - name: Send explicitly requested email preview (no WeChat)
         if: github.event_name == 'workflow_dispatch' && inputs.preview_email && !inputs.preview_push

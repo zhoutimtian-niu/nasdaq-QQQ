@@ -5,11 +5,11 @@ import re
 import smtplib
 import ssl
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from email.utils import format_datetime
 
-from notify import DeliveryUnknown, PushError, Receipt
+from notify import DeliveryUnknown, PushError, Receipt, utc_now, retry_due, schedule_retry
 from notification_state import StateError
 
 
@@ -48,9 +48,11 @@ class EmailConfig:
 
 
 class BackupEmail:
-    def __init__(self, config, connector=None):
+    def __init__(self, config, connector=None, clock=utc_now, retry_unknown_after=None):
         self.config = config
         self.connector = connector
+        self.clock = clock
+        self.retry_unknown_after = retry_unknown_after
 
     def connect(self):
         c = self.config
@@ -70,7 +72,8 @@ class BackupEmail:
             raise
 
     def publish(self, key, title, content, expires_at, store):
-        if expires_at <= datetime.now(timezone.utc):
+        now = self.clock()
+        if expires_at <= now:
             raise PushError('邮件已过有效窗口，未发送')
         email_key = hashlib.sha256(('backup-email-v1|' + key).encode()).hexdigest()
         # Same logical report + same content is stable across retries, but this
@@ -92,15 +95,23 @@ class BackupEmail:
                 if entry['status'] == 'smtp_accepted':
                     return Receipt('smtp_accepted', duplicate=True)
                 if entry['status'] in ('preparing', 'unknown'):
-                    raise DeliveryUnknown('上次SMTP结果未知，需核对发件箱／服务记录；未盲目重发')
+                    # Production opts into delayed recovery; Message-ID is not an
+                    # exactly-once SMTP guarantee when DATA's response was lost.
+                    try:
+                        age = now - datetime.fromisoformat(entry['created_at'])
+                    except (KeyError, TypeError, ValueError):
+                        age = None
+                    if self.retry_unknown_after is None or age is None or age < self.retry_unknown_after:
+                        raise DeliveryUnknown('上次SMTP结果未知，等待核对或延时恢复')
             attempts = entry.get('attempts', 0) if entry else 0
             if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
                 raise StateError('备用邮件尝试计数无效')
-            if attempts >= 3:
-                raise PushError('当日报告备用邮件已达到3次明确失败后的尝试上限')
+            if entry and not retry_due(entry, now):
+                return Receipt('retry_pending', duplicate=True)
             entry = dict(status='preparing', attempts=attempts+1,
-                         created_at=datetime.now(timezone.utc).isoformat(),
+                         created_at=now.isoformat(),
                          content_sha256=hashlib.sha256(content.encode()).hexdigest())
+            schedule_retry(entry, now)
             state['entries'][email_key] = entry
             if len(state['entries']) > 120:
                 state['entries'] = dict(list(state['entries'].items())[-120:])
