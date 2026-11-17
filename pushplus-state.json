@@ -181,6 +181,11 @@
       "attempts": 1,
       "created_at": "2026-11-17T01:56:12.710279+00:00",
       "content_sha256": "fe9feccf953c5aca52df195add03b3ba5221e7b7837bb37ad53f5f4dde3f541c"
+    },
+    "e73d9a4c80a8a43614309ae571b6e0201af0b7d5e013b0afeb3a747d777cc11d": {
+      "status": "routing",
+      "created_at": "2026-11-17T03:31:23.985834+00:00",
+      "fallback_started": false
     }
   }
 }
