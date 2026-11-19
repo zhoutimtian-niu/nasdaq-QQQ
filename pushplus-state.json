@@ -234,6 +234,13 @@
       "content_sha256": "0571e721291a4f886af193684cd100d990053d3b186b10a6b10aa732fcddd87a",
       "retry_after": "2026-11-19T00:38:43.372733+00:00",
       "short_code": "64859faf7dfd4011827621482d50fa69"
+    },
+    "4c414bb70a7f4f5c04678354a78082c9b880b5b0b0e5bb983c671057b2ea83cc": {
+      "status": "preparing",
+      "attempts": 1,
+      "created_at": "2026-11-19T02:41:43.908811+00:00",
+      "content_sha256": "25987d89fee77956ece0930a10a95a13b262737b85bdc7f2c01b1629a2b82992",
+      "retry_after": "2026-11-19T02:42:43.908811+00:00"
     }
   }
 }
