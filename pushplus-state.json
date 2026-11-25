@@ -306,6 +306,13 @@
       "status": "routing",
       "created_at": "2026-11-25T02:41:17.541111+00:00",
       "fallback_started": false
+    },
+    "91e187bc26fdee3ea5ce5d82c869f5e161a92975974704ae36fab30e923bcaa4": {
+      "status": "preparing",
+      "attempts": 1,
+      "created_at": "2026-11-25T02:41:18.995267+00:00",
+      "content_sha256": "ff8e44556112cf0caade205e6fd1f3b5bf459ee9956c222eb9028945b377f757",
+      "retry_after": "2026-11-25T02:42:18.995267+00:00"
     }
   }
 }
