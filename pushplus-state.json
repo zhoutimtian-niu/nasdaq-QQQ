@@ -341,6 +341,11 @@
       "created_at": "2026-11-25T23:50:24.139557+00:00",
       "content_sha256": "d758908edd1d96a8526f8a4087879cb1c9a5c5fa464109ec74c2f4f6e834e95a",
       "retry_after": "2026-11-25T23:51:24.139557+00:00"
+    },
+    "28aa26a9bb5450e2f9201bc5b793507c8bd1de5880c885668ac5e850f1fe0ae9": {
+      "status": "routing",
+      "created_at": "2026-11-27T19:01:27.065404+00:00",
+      "fallback_started": false
     }
   }
 }
